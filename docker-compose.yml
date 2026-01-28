@@ -1,0 +1,13 @@
+services:
+  uni-bot-active:
+    build: .
+    container_name: uni-bot-active
+    restart: always
+    
+    # 1. This tells Docker to read your local .env file
+    env_file:
+      - .env
+      
+    # 2. Mount the state file so the bot remembers its Token ID
+    volumes:
+     - ./bot_state.json:/app/bot_state.json

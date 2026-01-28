@@ -1,0 +1,4 @@
+slot0: refers to the first storage slot (slot index 0) of the Pool contract
+    packs the most frequently accessed and updated variables into a single 256-bit EVM storage slot
+    sqrtPriceX96 (uint160): The current price of the pool
+    tick (int24): current tick index corresponding to the price
