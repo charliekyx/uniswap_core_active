@@ -70,7 +70,7 @@ export async function approveAll(wallet: ethers.Wallet) {
 export async function atomicExitPosition(
     wallet: ethers.Wallet,
     tokenId: string
-) {
+): Promise<{ amount0: bigint, amount1: bigint }> {
     console.log(`\n[Exit] Executing Atomic Exit for Token ${tokenId}...`);
     const npm = new ethers.Contract(
         NONFUNGIBLE_POSITION_MANAGER_ADDR,
@@ -114,8 +114,24 @@ export async function atomicExitPosition(
 
     try {
         const tx = await npm.multicall(calls, { value: 0 });
-        await waitWithTimeout(tx, TX_TIMEOUT_MS);
+        const receipt = await waitWithTimeout(tx, TX_TIMEOUT_MS);
         console.log(`   Atomic Exit Successful! (Tx: ${tx.hash})`);
+
+        // [Analysis] Parse logs to find out how much we collected (Principal + Fees)
+        let collected0 = 0n;
+        let collected1 = 0n;
+        
+        for (const log of receipt.logs) {
+            try {
+                const parsed = npm.interface.parseLog(log);
+                if (parsed && parsed.name === "Collect") {
+                    collected0 += parsed.args.amount0;
+                    collected1 += parsed.args.amount1;
+                }
+            } catch (e) { /* ignore other events */ }
+        }
+        console.log(`   [Exit] Collected: ${collected0} / ${collected1}`);
+        return { amount0: collected0, amount1: collected1 };
     } catch (e) {
         console.error(`   Atomic Exit Failed:`, e);
         throw e;
@@ -491,8 +507,9 @@ export async function executeFullRebalance(
     }
 
     // 1. Exit Old Position
+    let exitInfo = { amount0: 0n, amount1: 0n };
     if (oldTokenId !== "0") {
-        await atomicExitPosition(wallet, oldTokenId);
+        exitInfo = await atomicExitPosition(wallet, oldTokenId);
     }
 
     console.log("   [System] Refreshing market data...");
@@ -601,6 +618,27 @@ export async function executeFullRebalance(
     console.log("   [System] Waiting 2s for balance sync...");
     await sleep(2000);
 
+    // [Analysis] Calculate Portfolio Value BEFORE Minting (Raw Tokens)
+    // This gives us the most accurate "Net Worth" snapshot.
+    const [balUSDC, balWETH] = await Promise.all([
+        getBalance(USDC_TOKEN, wallet),
+        getBalance(WETH_TOKEN, wallet)
+    ]);
+
+    const token0 = freshPool.token0;
+    const token1 = freshPool.token1;
+    
+    // Determine ETH Price in USD
+    // If Token0 is WETH, price is USDC/WETH. If Token1 is WETH, price is USDC/WETH.
+    // We assume the other token is USDC.
+    const ethPrice = (token0.symbol?.includes('ETH')) 
+        ? parseFloat(freshPool.token0Price.toSignificant(6))
+        : parseFloat(freshPool.token1Price.toSignificant(6));
+
+    const valEth = parseFloat(ethers.formatUnits(balWETH, 18)) * ethPrice;
+    const valUsdc = parseFloat(ethers.formatUnits(balUSDC, 6));
+    const totalValueUsd = valEth + valUsdc;
+
     // [Fix] Refresh pool state before minting.
     // Price moves during the sleep/swap. Using old 'freshPool' data causes
     // 'Price slippage check' reverts because amountMin is calculated on stale data.
@@ -628,6 +666,32 @@ export async function executeFullRebalance(
     
     if (newTokenId !== "0") {
         saveState(newTokenId);
+        
+        // Format Human-Readable Report
+        const exit0 = parseFloat(ethers.formatUnits(exitInfo.amount0, token0.decimals)).toFixed(4);
+        const exit1 = parseFloat(ethers.formatUnits(exitInfo.amount1, token1.decimals)).toFixed(2);
+        
+        const msg = `
+Strategy Rebalanced Successfully!
+
+[Old Position Exit]
+ID: ${oldTokenId}
+Collected: ${exit0} ${token0.symbol} + ${exit1} ${token1.symbol}
+
+[New Position Entry]
+ID: ${newTokenId}
+Range: [${tickLower}, ${tickUpper}]
+Current Price: $${ethPrice.toFixed(2)}
+
+[Portfolio Snapshot]
+Total Value: $${totalValueUsd.toFixed(2)}
+Held: ${parseFloat(ethers.formatUnits(balWETH, 18)).toFixed(4)} WETH + ${parseFloat(ethers.formatUnits(balUSDC, 6)).toFixed(2)} USDC
+        `.trim();
+
+        await sendEmailAlert(
+            `Rebalance Success - $${totalValueUsd.toFixed(0)}`,
+            msg
+        );
     } else {
         console.warn("[Strategy] Mint returned 0 ID. Keeping state as is (or 0).");
     }
