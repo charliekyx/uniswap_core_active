@@ -48,6 +48,7 @@ export async function scanLocalOrphans(wallet: ethers.Wallet): Promise<string> {
     // If running multiple bots/strategies, this logic needs to be more complex
     // Right now it only manages one wallet
     const idx = balance - 1n; 
+    console.log(`[State] Wallet has ${balance} positions. Checking index ${idx}...`);
     const tokenId = await npm.tokenOfOwnerByIndex(wallet.address, idx);
     
     const pos = await npm.positions(tokenId);
