@@ -10,7 +10,7 @@ import {
     NPM_ABI,
     NONFUNGIBLE_POSITION_MANAGER_ADDR,
     V3_FACTORY_ADDR,
-    REBALANCE_BUFFER_TICKS,
+    REBALANCE_BUFFER_FACTOR,
     CIRCUIT_BREAKER_DEVIATION_FACTOR,
 } from "./config";
 
@@ -222,10 +222,13 @@ async function onNewBlock(blockNumber: number) {
         return;
     }
 
-    // [Optimized] Hysteresis Buffer
+    // [Optimized] Dynamic Hysteresis Buffer
     // Only rebalance if price is SIGNIFICANTLY out of range.
     // This prevents realizing IL on small wicks/noise.
-    if (currentTick < (tl - REBALANCE_BUFFER_TICKS) || currentTick > (tu + REBALANCE_BUFFER_TICKS)) {
+    const dynamicBufferTicks = Math.floor(positionWidth * REBALANCE_BUFFER_FACTOR);
+    console.log(`   [Safety] Using dynamic rebalance buffer of ${dynamicBufferTicks} ticks.`);
+
+    if (currentTick < (tl - dynamicBufferTicks) || currentTick > (tu + dynamicBufferTicks)) {
         console.log(`[Strategy] Out of Range. Rebalancing...`);    
         await executeFullRebalance(wallet, configuredPool, tokenId);
         return;

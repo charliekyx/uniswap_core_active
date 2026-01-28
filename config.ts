@@ -34,20 +34,21 @@ export const RSI_OVERSOLD = 25;
 // The Problem: The market doesn't always follow the "average." A sudden crash or pump can be 2x or 3x the average volatility.
 export const ATR_SAFETY_FACTOR = 1;
 
-// [New] Buffer to prevent "whipsaw" rebalancing (Realizing IL too fast).
-// If price exits range by less than this amount, we hold (don't realize loss yet).
-export const REBALANCE_BUFFER_TICKS = 30;
+// Buffer to prevent "whipsaw" rebalancing (Realizing IL too fast).
+// This is now a percentage of the position's width.
+// 0.2 means the buffer is 20% of the position's total width.
+export const REBALANCE_BUFFER_FACTOR = 0.2;
 
-// [New] Volatility Circuit Breaker: Stop-loss mechanism
+// Volatility Circuit Breaker: Stop-loss mechanism
 // If price deviates from the position's center by more than (WIDTH * FACTOR), exit all to USDC.
 // A factor of 3.0 means if your range is +/-1%, this triggers at +/-3% deviation from center.
 export const CIRCUIT_BREAKER_DEVIATION_FACTOR = 3.0;
 
- // [Optimized] Lowered to 5 USDC for small capital active trading
- // Ensures we swap even small amounts to maintain the correct ratio
-export const REBALANCE_THRESHOLD_USDC = 5_000_000n;
-// 0.0015 ETH
-export const REBALANCE_THRESHOLD_WETH = 1_500_000_000_000_000n; 
+ // [Optimized for Arbitrum] Lowered to ~1 USDC.
+ // Since Gas is cheap, we can afford to rebalance even small dust to keep the ratio perfect.
+export const REBALANCE_THRESHOLD_USDC = 1_000_000n; 
+// ~0.0005 ETH
+export const REBALANCE_THRESHOLD_WETH = 500_000_000_000_000n; 
 
 
 // --- ABIs ---
