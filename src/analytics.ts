@@ -33,7 +33,7 @@ async function fetchCandles(symbol: string, interval: string, limit: number): Pr
     }
 }
 
-export async function getEthRsi(interval: string = '1h', period: number = 14): Promise<number> {
+export async function getEthRsi(interval: string = '15m', period: number = 14): Promise<number> {
     try {
         // Use withRetry to increase stability
         const data = await withRetry(() => fetchCandles('ETHUSDT', interval, period + 50));
@@ -59,7 +59,7 @@ export async function getEthRsi(interval: string = '1h', period: number = 14): P
  * Calculate Average True Range (ATR) to measure volatility in USD.
  * Returns the average dollar movement per candle (e.g., $30).
  */
-export async function getEthAtr(interval: string = '1h', period: number = 14): Promise<number> {
+export async function getEthAtr(interval: string = '15m', period: number = 14): Promise<number> {
     try {
         // Use withRetry to increase stability
         const data = await withRetry(() => fetchCandles('ETHUSDT', interval, period + 20));

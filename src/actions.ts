@@ -19,7 +19,6 @@ import {
     V3_FACTORY_ADDR,
     RSI_OVERBOUGHT,
     RSI_OVERSOLD,
-    AAVE_POOL_ADDR,
     REBALANCE_THRESHOLD_USDC,
     REBALANCE_THRESHOLD_WETH,
     ATR_SAFETY_FACTOR,
@@ -45,7 +44,6 @@ export async function approveAll(wallet: ethers.Wallet) {
     const spenders = [
         NONFUNGIBLE_POSITION_MANAGER_ADDR,
         SWAP_ROUTER_ADDR,
-        AAVE_POOL_ADDR,
     ];
 
     for (const token of tokens) {
@@ -101,6 +99,8 @@ export async function atomicExitPosition(
     }
 
     // 2. Collect Fees
+    // This collects both Principal (from decreaseLiquidity) and Fees.
+    // The result will be a mix of USDC and WETH depending on the pool price vs position range.
     const collectData = {
         tokenId: tokenId,
         recipient: wallet.address,
@@ -122,11 +122,13 @@ export async function atomicExitPosition(
     }
 }
 
-export async function rebalancePortfolio(
+export async function smartRebalance(
     wallet: ethers.Wallet,
-    configuredPool: Pool
+    configuredPool: Pool,
+    tickLower: number,
+    tickUpper: number
 ) {
-    console.log(`\n[Rebalance] Calculating Optimal Swap with RSI Filter...`);
+    console.log(`\n[Rebalance] Calculating Smart Swap for range [${tickLower}, ${tickUpper}]...`);
 
     const balUSDC = await getBalance(USDC_TOKEN, wallet);
     const balWETH = await getBalance(WETH_TOKEN, wallet);
@@ -136,15 +138,41 @@ export async function rebalancePortfolio(
             ? configuredPool.token0Price
             : configuredPool.token1Price;
 
-    const wethAmount = CurrencyAmount.fromRawAmount(
-        WETH_TOKEN,
-        balWETH.toString()
-    );
-    const usdcAmount = CurrencyAmount.fromRawAmount(
-        USDC_TOKEN,
-        balUSDC.toString()
-    );
-    const wethValueInUsdc = priceWethToUsdc.quote(wethAmount);
+    // 1. Calculate the Ideal Ratio for the new range
+    // We create a mock position with infinite liquidity to see what ratio Uniswap wants
+    const mockPosition = Position.fromAmounts({
+        pool: configuredPool,
+        tickLower,
+        tickUpper,
+        amount0: MAX_UINT128.toString(), 
+        amount1: MAX_UINT128.toString(),
+        useFullPrecision: true
+    });
+
+    const idealAmount0 = BigInt(mockPosition.mintAmounts.amount0.toString());
+    const idealAmount1 = BigInt(mockPosition.mintAmounts.amount1.toString());
+
+    // Handle Single-Sided Ranges (Price is outside or on the edge)
+    if (idealAmount0 === 0n) {
+        console.log("   [SmartSwap] Range requires 100% Token1. Swapping all Token0...");
+    } else if (idealAmount1 === 0n) {
+        console.log("   [SmartSwap] Range requires 100% Token0. Swapping all Token1...");
+    }
+
+    // 2. Calculate Total Portfolio Value in terms of Token1 (usually USDC if Token1 is USDC)
+    // This helps us determine how much of the total value should be in Token0 vs Token1
+    // Note: This is an estimation.
+    
+    // Current Balances
+    const currentAmount0 = configuredPool.token0.address === WETH_TOKEN.address ? balWETH : balUSDC;
+    const currentAmount1 = configuredPool.token1.address === WETH_TOKEN.address ? balWETH : balUSDC;
+
+    // Price of Token0 in terms of Token1
+    // [Optimized] Use higher precision for ratio calculation to minimize dust
+    const price0 = parseFloat(configuredPool.token0Price.toFixed(10));
+    
+    // Total Value in Token1 terms = Amount1 + (Amount0 * Price)
+    const totalValueInToken1 = Number(currentAmount1) + (Number(currentAmount0) * price0);
 
     const router = new ethers.Contract(
         SWAP_ROUTER_ADDR,
@@ -161,23 +189,45 @@ export async function rebalancePortfolio(
         return quotedAmount * (basis - tolerance) / basis;
     };
 
-    if (usdcAmount.greaterThan(wethValueInUsdc)) {
-        // Sell USDC
-        const diff = usdcAmount.subtract(wethValueInUsdc);
-        const amountToSell = diff.divide(2);
+    // 3. Calculate Target Amounts based on Ideal Ratio
+    // Ratio = idealAmount1 / idealAmount0
+    // TargetAmount0 * Price + TargetAmount1 = TotalValue
+    // TargetAmount1 = TargetAmount0 * (idealAmount1 / idealAmount0)
+    // -> TargetAmount0 * Price + TargetAmount0 * (ideal1/ideal0) = TotalValue
+    // -> TargetAmount0 * (Price + ideal1/ideal0) = TotalValue
+    // -> TargetAmount0 = TotalValue / (Price + ideal1/ideal0)
 
-        if (BigInt(amountToSell.quotient.toString()) < REBALANCE_THRESHOLD_USDC) {
+    const ratio = Number(idealAmount1) / Number(idealAmount0);
+    
+    // If ratio is Infinity (idealAmount0 is 0), we want 0 Token0.
+    // If ratio is 0 (idealAmount1 is 0), we want all Token0.
+    
+    let targetAmount0 = 0;
+    if (idealAmount0 === 0n) targetAmount0 = 0;
+    else if (idealAmount1 === 0n) targetAmount0 = Number(totalValueInToken1) / price0;
+    else targetAmount0 = totalValueInToken1 / (price0 + ratio);
+
+    // 4. Determine Swap Direction
+    if (Number(currentAmount0) > targetAmount0) {
+        // We have too much Token0 (e.g. WETH), sell difference for Token1 (USDC)
+        const amountToSellRaw = BigInt(Math.floor(Number(currentAmount0) - targetAmount0));
+        const amountToSell = CurrencyAmount.fromRawAmount(configuredPool.token0, amountToSellRaw.toString());
+
+        // Threshold check (approximate based on token type)
+        const threshold = configuredPool.token0.address === USDC_TOKEN.address ? REBALANCE_THRESHOLD_USDC : REBALANCE_THRESHOLD_WETH;
+        
+        if (amountToSellRaw < threshold) {
             console.log("   Balance is good enough. Skipping swap.");
             return;
         }
     
         const amountIn = BigInt(amountToSell.quotient.toString());
-        console.log(`   [Swap] Selling ${amountToSell.toSignificant(6)} USDC for WETH`);
+        console.log(`   [Swap] Selling ${amountToSell.toSignificant(6)} ${configuredPool.token0.symbol} for ${configuredPool.token1.symbol}`);
 
         // 1. Quote
         const quoteParams = {
-            tokenIn: USDC_TOKEN.address,
-            tokenOut: WETH_TOKEN.address,
+            tokenIn: configuredPool.token0.address,
+            tokenOut: configuredPool.token1.address,
             amountIn: amountIn,
             fee: POOL_FEE,
             sqrtPriceLimitX96: 0
@@ -186,11 +236,11 @@ export async function rebalancePortfolio(
         const [quotedAmountOut] = await quoter.getFunction("quoteExactInputSingle").staticCall(quoteParams);
         const amountOutMin = calculateMinOut(quotedAmountOut);
 
-        console.log(`   [Quote] Expect: ${ethers.formatEther(quotedAmountOut)} ETH, Min: ${ethers.formatEther(amountOutMin)}`);
+        console.log(`   [Quote] Expect: ${ethers.formatUnits(quotedAmountOut, configuredPool.token1.decimals)} ${configuredPool.token1.symbol}`);
 
        const tx = await router.exactInputSingle({
-            tokenIn: USDC_TOKEN.address,
-            tokenOut: WETH_TOKEN.address,
+            tokenIn: configuredPool.token0.address,
+            tokenOut: configuredPool.token1.address,
             fee: POOL_FEE,
             recipient: wallet.address,
             deadline: Math.floor(Date.now() / 1000) + 120,
@@ -201,29 +251,32 @@ export async function rebalancePortfolio(
 
         await waitWithTimeout(tx, TX_TIMEOUT_MS);
     } else {
-        // Sell WETH
-        const diffValueInUsdc = wethValueInUsdc.subtract(usdcAmount);
-        const amountToSellValue = diffValueInUsdc.divide(2);
+        // We need more Token0, sell Token1
+        // TargetAmount1 = TotalValue - (TargetAmount0 * Price)
+        const targetAmount1 = totalValueInToken1 - (targetAmount0 * price0);
+        
+        if (Number(currentAmount1) <= targetAmount1) {
+             console.log("   Balance is good enough (or deficit is negligible). Skipping swap.");
+             return;
+        }
 
-        const priceUsdcToWeth =
-            configuredPool.token0.address === USDC_TOKEN.address
-                ? configuredPool.token0Price
-                : configuredPool.token1Price;
+        const amountToSellRaw = BigInt(Math.floor(Number(currentAmount1) - targetAmount1));
+        const amountToSell = CurrencyAmount.fromRawAmount(configuredPool.token1, amountToSellRaw.toString());
 
-        const amountToSell = priceUsdcToWeth.quote(amountToSellValue);
-
-        if (BigInt(amountToSell.quotient.toString()) < REBALANCE_THRESHOLD_WETH) {
+        const threshold = configuredPool.token1.address === USDC_TOKEN.address ? REBALANCE_THRESHOLD_USDC : REBALANCE_THRESHOLD_WETH;
+        
+        if (amountToSellRaw < threshold) {
             console.log("   Balance is good enough. Skipping swap.");
             return;
         }
 
        const amountIn = BigInt(amountToSell.quotient.toString());
-        console.log(`   [Swap] Selling ${amountToSell.toSignificant(6)} WETH for USDC`);
+        console.log(`   [Swap] Selling ${amountToSell.toSignificant(6)} ${configuredPool.token1.symbol} for ${configuredPool.token0.symbol}`);
 
         // 1. Quote
         const quoteParams = {
-            tokenIn: WETH_TOKEN.address,
-            tokenOut: USDC_TOKEN.address,
+            tokenIn: configuredPool.token1.address,
+            tokenOut: configuredPool.token0.address,
             amountIn: amountIn,
             fee: POOL_FEE,
             sqrtPriceLimitX96: 0
@@ -231,11 +284,11 @@ export async function rebalancePortfolio(
         const [quotedAmountOut] = await quoter.getFunction("quoteExactInputSingle").staticCall(quoteParams);
         const amountOutMin = calculateMinOut(quotedAmountOut);
 
-        console.log(`   [Quote] Expect: ${ethers.formatUnits(quotedAmountOut, 6)} USDC, Min: ${ethers.formatUnits(amountOutMin, 6)}`);
+        console.log(`   [Quote] Expect: ${ethers.formatUnits(quotedAmountOut, configuredPool.token0.decimals)} ${configuredPool.token0.symbol}`);
 
         const tx = await router.exactInputSingle({
-            tokenIn: WETH_TOKEN.address,
-            tokenOut: USDC_TOKEN.address,
+            tokenIn: configuredPool.token1.address,
+            tokenOut: configuredPool.token0.address,
             fee: POOL_FEE,
             recipient: wallet.address,
             deadline: Math.floor(Date.now() / 1000) + 120,
@@ -332,6 +385,50 @@ export async function mintMaxLiquidity(
     return newTokenId;
 }
 
+export async function swapAllWethToUsdc(wallet: ethers.Wallet) {
+    console.log(`\n[CircuitBreaker] Swapping all remaining WETH to USDC...`);
+    const balWETH = await getBalance(WETH_TOKEN, wallet);
+
+    if (balWETH < REBALANCE_THRESHOLD_WETH) { // Use a threshold to avoid dust swaps
+        console.log(`   Negligible WETH balance. Skipping swap.`);
+        return;
+    }
+
+    const router = new ethers.Contract(SWAP_ROUTER_ADDR, SWAP_ROUTER_ABI, wallet);
+    const quoter = new ethers.Contract(QUOTER_ADDR, QUOTER_ABI, wallet);
+
+    // Quote
+    const quoteParams = {
+        tokenIn: WETH_TOKEN.address,
+        tokenOut: USDC_TOKEN.address,
+        amountIn: balWETH,
+        fee: POOL_FEE,
+        sqrtPriceLimitX96: 0
+    };
+    const [quotedAmountOut] = await quoter.getFunction("quoteExactInputSingle").staticCall(quoteParams);
+    
+    // Slippage
+    const tolerance = BigInt(SLIPPAGE_TOLERANCE.numerator.toString());
+    const basis = BigInt(SLIPPAGE_TOLERANCE.denominator.toString());
+    const amountOutMin = quotedAmountOut * (basis - tolerance) / basis;
+
+    console.log(`   [Swap] Selling ${ethers.formatEther(balWETH)} WETH for ~${ethers.formatUnits(quotedAmountOut, 6)} USDC.`);
+
+    const tx = await router.exactInputSingle({
+        tokenIn: WETH_TOKEN.address,
+        tokenOut: USDC_TOKEN.address,
+        fee: POOL_FEE,
+        recipient: wallet.address,
+        deadline: Math.floor(Date.now() / 1000) + 120,
+        amountIn: balWETH,
+        amountOutMinimum: amountOutMin,
+        sqrtPriceLimitX96: 0,
+    });
+
+    await waitWithTimeout(tx, TX_TIMEOUT_MS);
+    console.log(`   Swap to USDC complete.`);
+}
+
 // Full Rebalancing Process: Remove Old -> Swap -> Refresh Price -> Mint New
 export async function executeFullRebalance(
     wallet: ethers.Wallet,
@@ -375,8 +472,8 @@ export async function executeFullRebalance(
     let atr, rsi;
     try {
         [atr, rsi] = await Promise.all([
-            getEthAtr("1h"),
-            getEthRsi("1h")
+            getEthAtr("15m"),
+            getEthRsi("15m")
         ]);
         console.log(`   [Strategy] Data acquired. ATR: ${atr}, RSI: ${rsi}`);
     } catch (e) {
@@ -389,19 +486,9 @@ export async function executeFullRebalance(
         await atomicExitPosition(wallet, oldTokenId);
     }
 
-    // 2. Swap to align portfolio ratio
-    try {
-        await rebalancePortfolio(wallet, configuredPool);
-    } catch (e) {
-        console.error("   [Rebalance] Swap failed:", e);
-        await sendEmailAlert("Rebalance Swap Failed", `Swap likely reverted due to Slippage or Gas: ${e}`);
-        throw e; 
-    }
-
     console.log("   [System] Refreshing market data...");
 
-    // 3. Refresh Data (Fetch latest Price/Liquidity)
-    // Need to re-fetch data because the swap above changed the pool state
+    // 2. Refresh Data (Fetch latest Price/Liquidity)
     const [newSlot0, newLiquidity] = await Promise.all([
         poolContract.slot0(),
         poolContract.liquidity(),
@@ -438,7 +525,9 @@ export async function executeFullRebalance(
         `   [Strategy] ATR: $${atr.toFixed(2)} | Vol: ${volPercent.toFixed(2)}% | Calc Width: ${dynamicWidth}`
     );
 
-    const WIDTH = Math.max(500, Math.min(dynamicWidth, 4000));
+    // [Optimization] Lowered floor from 100 to 50.
+    // 50 ticks radius = +/- 0.5% range. This is "Hyper Active".
+    const WIDTH = Math.max(50, Math.min(dynamicWidth, 4000)); 
 
     console.log(`   [Strategy] Base Radius Width: ${WIDTH}`);
 
@@ -489,6 +578,16 @@ export async function executeFullRebalance(
         })`
     );
 
+    // 3. Smart Swap (Swap only what is needed for the NEW range)
+    try {
+        await smartRebalance(wallet, freshPool, tickLower, tickUpper);
+    } catch (e) {
+        console.error("   [Rebalance] Swap failed:", e);
+        await sendEmailAlert("Rebalance Swap Failed", `Swap likely reverted due to Slippage or Gas: ${e}`);
+        throw e; 
+    }
+
+    // 4. Mint
     const newTokenId = await mintMaxLiquidity(
         wallet,
         freshPool,

@@ -7,7 +7,7 @@ import { ethers } from "ethers";
 import { NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI } from "../config";
 
 
-const STATE_FILE = path.join(process.cwd(), "bot_state.json");
+const STATE_FILE = path.join(process.cwd(), "bot_state_active.json");
 
 export interface BotState {
     tokenId: string; // tokenid from my last postion mint

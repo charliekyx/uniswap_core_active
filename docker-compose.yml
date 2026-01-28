@@ -10,4 +10,4 @@ services:
       
     # 2. Mount the state file so the bot remembers its Token ID
     volumes:
-     - ./bot_state.json:/app/bot_state.json
+     - ./bot_state_active.json:/app/bot_state_active.json

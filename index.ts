@@ -1,5 +1,5 @@
 import { ethers, NonceManager } from "ethers";
-import { Pool, Position } from "@uniswap/v3-sdk";
+import { Pool } from "@uniswap/v3-sdk";
 import * as dotenv from "dotenv";
 
 import {
@@ -10,27 +10,23 @@ import {
     NPM_ABI,
     NONFUNGIBLE_POSITION_MANAGER_ADDR,
     V3_FACTORY_ADDR,
+    REBALANCE_BUFFER_TICKS,
+    CIRCUIT_BREAKER_DEVIATION_FACTOR,
 } from "./config";
 
-import { loadState, scanLocalOrphans } from "./src/state"; // [Added] scanLocalOrphans
-import { approveAll, executeFullRebalance } from "./src/actions";
-import { AaveManager } from "./src/hedge";
+import { loadState, saveState, scanLocalOrphans } from "./src/state"; // [Added] scanLocalOrphans
+import { approveAll, executeFullRebalance, atomicExitPosition, swapAllWethToUsdc } from "./src/actions";
 import { RobustProvider } from "./src/connection";
 import { sendEmailAlert } from "./src/utils";
 
 dotenv.config();
-
-const HEDGE_CHECK_INTERVAL_MS = 60 * 1000; // 1 min
 
 let wallet: ethers.Wallet;
 let provider: ethers.Provider;
 let robustProvider: RobustProvider;
 let npm: ethers.Contract;
 let poolContract: ethers.Contract;
-let aave: AaveManager;
-
-let isProcessing = false; 
-let lastHedgeTime = 0; 
+let isProcessing = false;
 
 // Safe Mode Flag
 let isSafeMode = false;
@@ -66,7 +62,6 @@ async function initialize() {
         
         poolContract = poolContract.connect(provider) as ethers.Contract;
         npm = npm.connect(wallet) as ethers.Contract; 
-        aave = new AaveManager(wallet);
 
         console.log("[System] Contracts and Managers re-linked to new provider.");
         
@@ -86,7 +81,6 @@ async function initialize() {
     const poolAddr = Pool.getAddress(USDC_TOKEN, WETH_TOKEN, POOL_FEE, undefined, V3_FACTORY_ADDR);
     poolContract = new ethers.Contract(poolAddr, POOL_ABI, provider);
     npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
-    aave = new AaveManager(wallet);
 
     console.log(`[System] Initialized.`);
 
@@ -160,33 +154,19 @@ async function onNewBlock(blockNumber: number) {
 
         // If executeFullRebalance throws (e.g. TWAP check failed), catch it here
         // protects app from crashing, waits for next block retry.
-        await executeFullRebalance(wallet, configuredPool, "0");
+        try {
+            await executeFullRebalance(wallet, configuredPool, "0");
+        } catch (e) {
+            // This is the "Judging" phase. If TWAP fails, we wait.
+            console.warn(`[Strategy] Auto-reentry skipped: ${(e as any).message}. Waiting for market stability...`);
+        }
 
-        lastHedgeTime = 0;
-        return;
-    }
-
-    // ============================================================
-    // CRITICAL PATH: SAFETY CHECK
-    // ============================================================
-    // If check returns false, enter Safe Mode
-    const isSafe = await aave.checkHealthAndPanic(tokenId, poolContract);
-
-    if (!isSafe) {
-        console.error("[System] Panic exit triggered. Entering SAFE MODE.");
-        await sendEmailAlert("Bot Stopped", "Entered SAFE MODE after panic exit.");
-        isSafeMode = true; // Lock status, stop all operations
         return;
     }
 
     // ============================================================
     // STRATEGY PATH
     // ============================================================
-
-    const now = Date.now();
-    if (now - lastHedgeTime < HEDGE_CHECK_INTERVAL_MS) {
-        return;
-    }
 
     console.log(`[Block ${blockNumber}] Running Strategy Logic...`);
 
@@ -209,39 +189,47 @@ async function onNewBlock(blockNumber: number) {
     if (pos.liquidity === 0n) {
         await sendEmailAlert("CRITICAL: Position Closed.", `ID: ${tokenId}`);
         // Mark as orphan or reset
-        await scanLocalOrphans(wallet); 
+        const foundId = await scanLocalOrphans(wallet); 
+        if (foundId === "0") {
+            console.log("[System] No orphan position found. Resetting state to 0 to trigger new entry.");
+            saveState("0");
+        }
         return null;
     }
 
     const tl = Number(pos.tickLower);
     const tu = Number(pos.tickUpper);
 
-    if (currentTick < tl || currentTick > tu) {
-        console.log(`[Strategy] Out of Range. Rebalancing...`);    
-        await executeFullRebalance(wallet, configuredPool, tokenId);
-        lastHedgeTime = Date.now(); 
+    // [New] Circuit Breaker / Stop-Loss Logic
+    const positionWidth = tu - tl;
+    const centerTick = (tl + tu) / 2;
+    const distanceFromCenter = Math.abs(currentTick - centerTick);
+    const stopLossThreshold = positionWidth * CIRCUIT_BREAKER_DEVIATION_FACTOR;
+
+    if (distanceFromCenter > stopLossThreshold) {
+        console.warn(`[CIRCUIT BREAKER] Price has moved significantly (${distanceFromCenter} ticks) away from position center. Triggering stop-loss.`);
+        await sendEmailAlert("CIRCUIT BREAKER TRIGGERED", `Price moved ${distanceFromCenter} ticks from range center. Exiting to USDC.`);
+        
+        // 1. Exit position
+        await atomicExitPosition(wallet, tokenId);
+        
+        // 2. Swap all WETH to USDC
+        await swapAllWethToUsdc(wallet);
+        
+        // 3. Clear state and enter safe mode
+        saveState("0");
+        console.warn(`[CIRCUIT BREAKER] Position closed. Bot will continue running and attempt to re-enter when market conditions stabilize.`);
         return;
     }
 
-    // Check Hedge
-    const positionSDK = new Position({
-        pool: configuredPool,
-        liquidity: pos.liquidity.toString(),
-        tickLower: tl,
-        tickUpper: tu,
-    });
-
-    const amount0 = BigInt(positionSDK.amount0.quotient.toString());
-    const amount1 = BigInt(positionSDK.amount1.quotient.toString());
-
-    const lpEthAmount =
-        WETH_TOKEN.address.toLowerCase() < USDC_TOKEN.address.toLowerCase()
-            ? amount0
-            : amount1;
-
-    await aave.adjustHedge(lpEthAmount, tokenId);
-
-    lastHedgeTime = Date.now();
+    // [Optimized] Hysteresis Buffer
+    // Only rebalance if price is SIGNIFICANTLY out of range.
+    // This prevents realizing IL on small wicks/noise.
+    if (currentTick < (tl - REBALANCE_BUFFER_TICKS) || currentTick > (tu + REBALANCE_BUFFER_TICKS)) {
+        console.log(`[Strategy] Out of Range. Rebalancing...`);    
+        await executeFullRebalance(wallet, configuredPool, tokenId);
+        return;
+    }
 }
 
 initialize().catch(console.error);

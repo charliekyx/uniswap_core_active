@@ -17,7 +17,7 @@ export const SLIPPAGE_TOLERANCE = new Percent(50, 10_000); // 0.5%
 
 export const MAX_UINT128 = (1n << 128n) - 1n;
 
-export const POOL_FEE = FeeAmount.MEDIUM;
+export const POOL_FEE = FeeAmount.LOW;
 
  export const DELTA_NEUTRAL_THRESHOLD = ethers.parseEther("0.02"); // 0.02 ETH to avoid gas waste from uncessary hedgeing
 
@@ -32,17 +32,23 @@ export const RSI_OVERSOLD = 25;
 // a Risk Management parameter. It determines how "conservative" or "aggressive" your bot is.
 // ATR (Average True Range): This tells you the average volatility over the past few hours.
 // The Problem: The market doesn't always follow the "average." A sudden crash or pump can be 2x or 3x the average volatility.
-export const ATR_SAFETY_FACTOR = 4;
+export const ATR_SAFETY_FACTOR = 1;
 
- // 30 USDC (6 decimals) = 30,000,000
- // for fund around 2000 - 3000 this threshold is good, prevent from rebalancing too often
-export const REBALANCE_THRESHOLD_USDC = 30_000_000n;
-// 0.01 WETH (18 decimals) = 10,000,000,000,000,000
-export const REBALANCE_THRESHOLD_WETH = 10_000_000_000_000_000n;
+// [New] Buffer to prevent "whipsaw" rebalancing (Realizing IL too fast).
+// If price exits range by less than this amount, we hold (don't realize loss yet).
+export const REBALANCE_BUFFER_TICKS = 30;
 
-// --- Aave Configuration ---
-export const AAVE_TARGET_HEALTH_FACTOR = 1.7; // Target safety buffer
-export const AAVE_MIN_HEALTH_FACTOR = 1.5;    // Critical warning level
+// [New] Volatility Circuit Breaker: Stop-loss mechanism
+// If price deviates from the position's center by more than (WIDTH * FACTOR), exit all to USDC.
+// A factor of 3.0 means if your range is +/-1%, this triggers at +/-3% deviation from center.
+export const CIRCUIT_BREAKER_DEVIATION_FACTOR = 3.0;
+
+ // [Optimized] Lowered to 5 USDC for small capital active trading
+ // Ensures we swap even small amounts to maintain the correct ratio
+export const REBALANCE_THRESHOLD_USDC = 5_000_000n;
+// 0.0015 ETH
+export const REBALANCE_THRESHOLD_WETH = 1_500_000_000_000_000n; 
+
 
 // --- ABIs ---
 export const ERC20_ABI = [
@@ -73,14 +79,6 @@ export const SWAP_ROUTER_ABI = [
     "function exactOutputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 deadline, uint256 amountOut, uint256 amountInMaximum, uint160 sqrtPriceLimitX96)) external payable returns (uint256 amountIn)",
 ];
 
-// Aave V3 Pool ABI
-export const AAVE_POOL_ABI = [
-    "function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode) external",
-    "function borrow(address asset, uint256 amount, uint256 interestRateMode, uint16 referralCode, address onBehalfOf) external",
-    "function repay(address asset, uint256 amount, uint256 interestRateMode, address onBehalfOf) external returns (uint256)",
-    "function getUserAccountData(address user) external view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)",
-] as const;
-
 export const QUOTER_ABI = [
     "function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96)) external returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)",
     "function quoteExactOutputSingle((address tokenIn, address tokenOut, uint256 amount, uint24 fee, uint160 sqrtPriceLimitX96)) external returns (uint256 amountIn, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)"
@@ -96,9 +94,6 @@ let NPM_ADDR_CONF: string;
 let V3_FACTORY_ADDR_CONF: string;
 let SWAP_ROUTER_ADDR_CONF: string;
 let QUOTER_ADDR_CONF: string;
-
-let AAVE_POOL_ADDR_CONF: string;
-let WETH_DEBT_TOKEN_ADDR_CONF: string;
 
 if (NETWORK === "MAINNET") {
     // https://docs.arbitrum.io/for-devs/dev-tools-and-resources/chain-info
@@ -133,14 +128,6 @@ if (NETWORK === "MAINNET") {
 
     QUOTER_ADDR_CONF = safeLower("0x61fFE014bA17989E743c5F6cB21bF9697530B21e");
 
-    // Aave V3 Arbitrum Addresses
-    AAVE_POOL_ADDR_CONF = safeLower(
-        "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
-    );
-    // Aave Variable Debt WETH Token (Arbitrum)
-    WETH_DEBT_TOKEN_ADDR_CONF = safeLower(
-        "0x0c84331e39d6658Cd6e6b9ba04736cC4c4734351"
-    );
 } else {
     // Sepolia
     CHAIN_ID = 11155111;
@@ -166,9 +153,6 @@ if (NETWORK === "MAINNET") {
         "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E"
     );
     QUOTER_ADDR_CONF = safeLower("0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3");
-
-    AAVE_POOL_ADDR_CONF = "0x0000000000000000000000000000000000000000";
-    WETH_DEBT_TOKEN_ADDR_CONF = "0x0000000000000000000000000000000000000000";
 }
 
 export const CURRENT_CHAIN_ID = CHAIN_ID;
@@ -178,5 +162,3 @@ export const NONFUNGIBLE_POSITION_MANAGER_ADDR = NPM_ADDR_CONF;
 export const V3_FACTORY_ADDR = V3_FACTORY_ADDR_CONF;
 export const SWAP_ROUTER_ADDR = SWAP_ROUTER_ADDR_CONF;
 export const QUOTER_ADDR = QUOTER_ADDR_CONF;
-export const AAVE_POOL_ADDR = AAVE_POOL_ADDR_CONF;
-export const WETH_DEBT_TOKEN_ADDR = WETH_DEBT_TOKEN_ADDR_CONF;
