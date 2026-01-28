@@ -73,6 +73,8 @@ export const NPM_ABI = [
     "function decreaseLiquidity((uint256 tokenId, uint128 liquidity, uint256 amount0Min, uint256 amount1Min, uint256 deadline)) payable returns (uint256 amount0, uint256 amount1)",
     "function burn(uint256 tokenId) payable",
     "function multicall(bytes[] calldata data) external payable returns (bytes[] memory results)",
+    "function balanceOf(address owner) view returns (uint256)",
+    "function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)"
 ];
 
 export const SWAP_ROUTER_ABI = [
