@@ -32,12 +32,12 @@ export const RSI_OVERSOLD = 25;
 // a Risk Management parameter. It determines how "conservative" or "aggressive" your bot is.
 // ATR (Average True Range): This tells you the average volatility over the past few hours.
 // The Problem: The market doesn't always follow the "average." A sudden crash or pump can be 2x or 3x the average volatility.
-export const ATR_SAFETY_FACTOR = 1;
+export const ATR_SAFETY_FACTOR = 2;
 
 // Buffer to prevent "whipsaw" rebalancing (Realizing IL too fast).
 // This is now a percentage of the position's width.
 // 0.2 means the buffer is 20% of the position's total width.
-export const REBALANCE_BUFFER_FACTOR = 0.2;
+export const REBALANCE_BUFFER_FACTOR = 0.5;
 
 // Volatility Circuit Breaker: Stop-loss mechanism
 // If price deviates from the position's center by more than (WIDTH * FACTOR), exit all to USDC.

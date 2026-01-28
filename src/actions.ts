@@ -551,9 +551,9 @@ export async function executeFullRebalance(
         `   [Strategy] ATR: $${atr.toFixed(2)} | Vol: ${volPercent.toFixed(2)}% | Calc Width: ${dynamicWidth}`
     );
 
-    // [Optimization] Lowered floor from 100 to 50.
-    // 50 ticks radius = +/- 0.5% range. This is "Hyper Active".
-    const WIDTH = Math.max(50, Math.min(dynamicWidth, 4000)); 
+    // [Optimization] Increased floor to 200 to prevent over-trading.
+    // 200 ticks radius = +/- 2% range.
+    const WIDTH = Math.max(200, Math.min(dynamicWidth, 4000)); 
 
     console.log(`   [Strategy] Base Radius Width: ${WIDTH}`);
 
