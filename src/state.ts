@@ -17,9 +17,12 @@ export interface BotState {
 export function loadState(): BotState {
     if (fs.existsSync(STATE_FILE)) {
         try {
-            return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+            const fileContent = fs.readFileSync(STATE_FILE, "utf8");
+            if (fileContent) {
+                return JSON.parse(fileContent);
+            }
         } catch (e) {
-            console.error("[System] Corrupt state file. Resetting.");
+            console.error("[System] Corrupt state file, could not parse JSON. Resetting.");
         }
     }
     return { tokenId: "0", lastCheck: 0 };
