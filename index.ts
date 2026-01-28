@@ -125,8 +125,20 @@ async function setupEventListeners() {
         try {
             lastRunTime = now; 
             await onNewBlock(blockNumber);
-        } catch (e) {
+        } catch (e: any) {
             console.error(`[Block ${blockNumber}] Error:`, e);
+            
+            // Auto-switch provider on network/rate-limit errors
+            const errStr = e.toString().toLowerCase();
+            if (
+                errStr.includes("too many requests") || 
+                errStr.includes("429") || 
+                errStr.includes("bad_data") ||
+                errStr.includes("timeout")
+            ) {
+                console.warn(`[System] RPC Instability detected. Switching provider...`);
+                await robustProvider.triggerNextProvider();
+            }
         } finally {
             isProcessing = false;
         }

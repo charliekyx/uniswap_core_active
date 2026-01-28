@@ -3,16 +3,13 @@ import { RSI, ATR } from 'technicalindicators';
 import { withRetry } from './utils'; // Reuse retry logic
 
 // Binance API for public market data
-const BINANCE_API_URLS = [
-    'https://api.binance.com/api/v3/klines',
-    'https://api.binance.us/api/v3/klines',     // US fallback
-    'https://api1.binance.com/api/v3/klines',   // Alt domain 1
-    'https://api2.binance.com/api/v3/klines',   // Alt domain 2
-    'https://api3.binance.com/api/v3/klines'    // Alt domain 3
-];
+const BINANCE_API_URL = 'https://api.binance.us/api/v3/klines'; // Prioritize US for stability
+const BINANCE_GLOBAL_URL = 'https://api.binance.com/api/v3/klines';
 
 // Coinbase API for fallback (ETH-USD)
 const COINBASE_API_URL = 'https://api.exchange.coinbase.com/products/ETH-USD/candles';
+// Kraken API for fallback
+const KRAKEN_API_URL = 'https://api.kraken.com/0/public/OHLC';
 
 interface CandleData {
     high: number[];
@@ -20,64 +17,84 @@ interface CandleData {
     close: number[];
 }
 
-async function fetchCandles(symbol: string, interval: string, limit: number): Promise<CandleData> {
-    let lastError: any;
+async function fetchFromCoinbase(interval: string): Promise<CandleData> {
+    // Map interval to seconds (Coinbase 'granularity')
+    const granularityMap: Record<string, number> = {
+        '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '6h': 21600, '1d': 86400
+    };
+    const granularity = granularityMap[interval] || 900;
 
-    for (const url of BINANCE_API_URLS) {
-        try {
-            const response = await axios.get(url, {
-                params: {
-                    symbol: symbol,
-                    interval: interval,
-                    limit: limit
-                },
-                timeout: 5000 // 5s timeout per node to fail fast
-            });
-
-            // Binance API format: [open_time, open, high, low, close, ...]
-            // Index: 2=High, 3=Low, 4=Close
-            const highs = response.data.map((c: any[]) => parseFloat(c[2]));
-            const lows = response.data.map((c: any[]) => parseFloat(c[3]));
-            const closes = response.data.map((c: any[]) => parseFloat(c[4]));
-
-            return { high: highs, low: lows, close: closes };
-        } catch (error) {
-            console.warn(`[Analytics] Failed to fetch from ${url}: ${(error as Error).message}. Trying next...`);
-            lastError = error;
-        }
-    }
-
-    // Fallback to Coinbase
     try {
-        console.warn(`[Analytics] Binance nodes failed. Trying Coinbase fallback...`);
-        
-        // Map interval to seconds (Coinbase 'granularity')
-        // 1m=60, 5m=300, 15m=900, 1h=3600, 6h=21600, 1d=86400
-        const granularityMap: Record<string, number> = {
-            '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '6h': 21600, '1d': 86400
-        };
-        const granularity = granularityMap[interval] || 900;
-
         const response = await axios.get(COINBASE_API_URL, {
             params: { granularity },
-            timeout: 5000
+            timeout: 3000
         });
 
-        // Coinbase response: [ [time, low, high, open, close, volume], ... ] (Newest first)
-        // We need to reverse it to be Oldest first for technical indicators
         const sorted = response.data.reverse();
-        
-        const highs = sorted.map((c: number[]) => c[2]); // Index 2 = High
-        const lows = sorted.map((c: number[]) => c[1]);  // Index 1 = Low
-        const closes = sorted.map((c: number[]) => c[4]); // Index 4 = Close
-
-        return { high: highs, low: lows, close: closes };
+        return {
+            high: sorted.map((c: number[]) => c[2]),
+            low: sorted.map((c: number[]) => c[1]),
+            close: sorted.map((c: number[]) => c[4])
+        };
     } catch (error) {
-        console.warn(`[Analytics] Failed to fetch from Coinbase: ${(error as Error).message}`);
-        lastError = error;
+        throw new Error(`Coinbase failed: ${(error as Error).message}`);
     }
+}
 
-    throw new Error(`Failed to fetch market data from all sources. Last error: ${(lastError as Error).message}`);
+async function fetchFromKraken(interval: string): Promise<CandleData> {
+    const intervalMap: Record<string, number> = { '1m': 1, '5m': 5, '15m': 15, '1h': 60, '4h': 240, '1d': 1440 };
+    const minutes = intervalMap[interval] || 15;
+
+    try {
+        const response = await axios.get(KRAKEN_API_URL, {
+            params: { pair: 'ETHUSD', interval: minutes },
+            timeout: 3000
+        });
+        
+        if (response.data.error && response.data.error.length > 0) throw new Error(response.data.error.join(', '));
+        
+        const keys = Object.keys(response.data.result).filter(k => k !== 'last');
+        const data = response.data.result[keys[0]];
+        
+        return {
+            high: data.map((c: any[]) => parseFloat(c[2])),
+            low: data.map((c: any[]) => parseFloat(c[3])),
+            close: data.map((c: any[]) => parseFloat(c[4]))
+        };
+    } catch (error) {
+        throw new Error(`Kraken failed: ${(error as Error).message}`);
+    }
+}
+
+async function fetchFromBinance(symbol: string, interval: string, limit: number): Promise<CandleData> {
+    // Try US first, then Global
+    const urls = [BINANCE_API_URL, BINANCE_GLOBAL_URL];
+    
+    for (const url of urls) {
+        try {
+            const response = await axios.get(url, {
+                params: { symbol, interval, limit },
+                timeout: 3000
+            });
+            return {
+                high: response.data.map((c: any[]) => parseFloat(c[2])),
+                low: response.data.map((c: any[]) => parseFloat(c[3])),
+                close: response.data.map((c: any[]) => parseFloat(c[4]))
+            };
+        } catch (error: any) {
+            if (error.response?.status === 451) continue; // Geo-blocked, try next
+        }
+    }
+    throw new Error("Binance failed");
+}
+
+async function fetchCandles(symbol: string, interval: string, limit: number): Promise<CandleData> {
+    // Priority: Coinbase -> Kraken -> Binance
+    try { return await fetchFromCoinbase(interval); } catch (e) { /* ignore */ }
+    try { return await fetchFromKraken(interval); } catch (e) { /* ignore */ }
+    try { return await fetchFromBinance(symbol, interval, limit); } catch (e) { /* ignore */ }
+
+    throw new Error(`Failed to fetch market data from all sources.`);
 }
 
 export async function getEthRsi(interval: string = '15m', period: number = 14): Promise<number> {

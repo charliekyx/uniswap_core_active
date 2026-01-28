@@ -26,7 +26,7 @@ import {
     QUOTER_ABI,
 } from "../config";
 
-import { withRetry, waitWithTimeout, getPoolTwap, sendEmailAlert } from "./utils";
+import { withRetry, waitWithTimeout, getPoolTwap, sendEmailAlert, sleep } from "./utils";
 import { saveState } from "./state";
 import { getEthAtr, getEthRsi } from "./analytics";
 
@@ -319,9 +319,11 @@ export async function mintMaxLiquidity(
             ? balWETH
             : balUSDC;
 
-    // 99.9% Buffer
-    const amount0Safe = (amount0Input * 999n) / 1000n;
-    const amount1Safe = (amount1Input * 999n) / 1000n;
+    // [Optimized] 99% Buffer (was 99.9%)
+    // Lowered to 99% to prevent "Transfer amount exceeds balance" errors due to 
+    // tiny dust issues or RPC balance sync lags.
+    const amount0Safe = (amount0Input * 990n) / 1000n;
+    const amount1Safe = (amount1Input * 990n) / 1000n;
 
     const position = Position.fromAmounts({
         pool: configuredPool,
@@ -586,6 +588,11 @@ export async function executeFullRebalance(
         await sendEmailAlert("Rebalance Swap Failed", `Swap likely reverted due to Slippage or Gas: ${e}`);
         throw e; 
     }
+
+    // [Safety] Wait 2 seconds for RPC nodes to sync the new balances after the Swap.
+    // This prevents Mint from failing due to reading old (insufficient) balances.
+    console.log("   [System] Waiting 2s for balance sync...");
+    await sleep(2000);
 
     // 4. Mint
     const newTokenId = await mintMaxLiquidity(
