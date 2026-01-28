@@ -167,19 +167,17 @@ export async function smartRebalance(
     const currentAmount0 = configuredPool.token0.address === WETH_TOKEN.address ? balWETH : balUSDC;
     const currentAmount1 = configuredPool.token1.address === WETH_TOKEN.address ? balWETH : balUSDC;
 
-    // Price of Token0 in terms of Token1
-    // [Optimized] Use higher precision for ratio calculation to minimize dust
+    // Convert to Human-Readable numbers for calculation to avoid Unit mixing bugs
+    const bal0 = parseFloat(ethers.formatUnits(currentAmount0, configuredPool.token0.decimals));
+    const bal1 = parseFloat(ethers.formatUnits(currentAmount1, configuredPool.token1.decimals));
+
+    // Price of Token0 in terms of Token1 (e.g. 2600 USDC per ETH)
     const price0 = parseFloat(configuredPool.token0Price.toFixed(10));
     
-    // Total Value in Token1 terms = Amount1 + (Amount0 * Price)
-    const totalValueInToken1 = Number(currentAmount1) + (Number(currentAmount0) * price0);
+    // Total Portfolio Value in Token1 terms
+    const totalValue = bal1 + (bal0 * price0);
 
-    const router = new ethers.Contract(
-        SWAP_ROUTER_ADDR,
-        SWAP_ROUTER_ABI,
-        wallet
-    );
-
+    const router = new ethers.Contract(SWAP_ROUTER_ADDR, SWAP_ROUTER_ABI, wallet);
     const quoter = new ethers.Contract(QUOTER_ADDR, QUOTER_ABI, wallet);
 
     // Slippage Helper
@@ -189,28 +187,30 @@ export async function smartRebalance(
         return quotedAmount * (basis - tolerance) / basis;
     };
 
-    // 3. Calculate Target Amounts based on Ideal Ratio
-    // Ratio = idealAmount1 / idealAmount0
-    // TargetAmount0 * Price + TargetAmount1 = TotalValue
-    // TargetAmount1 = TargetAmount0 * (idealAmount1 / idealAmount0)
-    // -> TargetAmount0 * Price + TargetAmount0 * (ideal1/ideal0) = TotalValue
-    // -> TargetAmount0 * (Price + ideal1/ideal0) = TotalValue
-    // -> TargetAmount0 = TotalValue / (Price + ideal1/ideal0)
+    // 3. Calculate Target Amounts based on Ideal Ratio (Human Readable)
+    const ideal0Raw = BigInt(mockPosition.mintAmounts.amount0.toString());
+    const ideal1Raw = BigInt(mockPosition.mintAmounts.amount1.toString());
+    
+    const ideal0 = parseFloat(ethers.formatUnits(ideal0Raw, configuredPool.token0.decimals));
+    const ideal1 = parseFloat(ethers.formatUnits(ideal1Raw, configuredPool.token1.decimals));
+    
+    let ratio = 0;
+    if (ideal0 === 0) ratio = Infinity; // Pure Token1 needed
+    else ratio = ideal1 / ideal0;
+    
+    // Target Amount0 formula: Value = T0 * Price + T0 * Ratio
+    let target0 = 0;
+    if (ratio === Infinity) target0 = 0;
+    else target0 = totalValue / (price0 + ratio);
 
-    const ratio = Number(idealAmount1) / Number(idealAmount0);
-    
-    // If ratio is Infinity (idealAmount0 is 0), we want 0 Token0.
-    // If ratio is 0 (idealAmount1 is 0), we want all Token0.
-    
-    let targetAmount0 = 0;
-    if (idealAmount0 === 0n) targetAmount0 = 0;
-    else if (idealAmount1 === 0n) targetAmount0 = Number(totalValueInToken1) / price0;
-    else targetAmount0 = totalValueInToken1 / (price0 + ratio);
+    // Convert Target back to Raw BigInt
+    // Use toFixed to avoid scientific notation issues with parseUnits
+    const targetAmount0 = ethers.parseUnits(target0.toFixed(configuredPool.token0.decimals), configuredPool.token0.decimals);
 
     // 4. Determine Swap Direction
-    if (Number(currentAmount0) > targetAmount0) {
+    if (currentAmount0 > targetAmount0) {
         // We have too much Token0 (e.g. WETH), sell difference for Token1 (USDC)
-        const amountToSellRaw = BigInt(Math.floor(Number(currentAmount0) - targetAmount0));
+        const amountToSellRaw = currentAmount0 - targetAmount0;
         const amountToSell = CurrencyAmount.fromRawAmount(configuredPool.token0, amountToSellRaw.toString());
 
         // Threshold check (approximate based on token type)
@@ -251,16 +251,15 @@ export async function smartRebalance(
 
         await waitWithTimeout(tx, TX_TIMEOUT_MS);
     } else {
-        // We need more Token0, sell Token1
-        // TargetAmount1 = TotalValue - (TargetAmount0 * Price)
-        const targetAmount1 = totalValueInToken1 - (targetAmount0 * price0);
+        const target1 = totalValue - (target0 * price0);
+        const targetAmount1 = ethers.parseUnits(target1.toFixed(configuredPool.token1.decimals), configuredPool.token1.decimals);
         
-        if (Number(currentAmount1) <= targetAmount1) {
+        if (currentAmount1 <= targetAmount1) {
              console.log("   Balance is good enough (or deficit is negligible). Skipping swap.");
              return;
         }
 
-        const amountToSellRaw = BigInt(Math.floor(Number(currentAmount1) - targetAmount1));
+        const amountToSellRaw = currentAmount1 - targetAmount1;
         const amountToSell = CurrencyAmount.fromRawAmount(configuredPool.token1, amountToSellRaw.toString());
 
         const threshold = configuredPool.token1.address === USDC_TOKEN.address ? REBALANCE_THRESHOLD_USDC : REBALANCE_THRESHOLD_WETH;
@@ -352,6 +351,12 @@ export async function mintMaxLiquidity(
         recipient: wallet.address,
         deadline: Math.floor(Date.now() / 1000) + 120,
     };
+
+    // [Safety] Check for Zero Amounts to prevent Reverts
+    if (BigInt(mintParams.amount0Desired) === 0n && BigInt(mintParams.amount1Desired) === 0n) {
+        console.warn(`[Mint] Aborting: Calculated mint amounts are ZERO. (Check WETH/USDC balances)`);
+        return "0";
+    }
 
     console.log(`\n[Mint] Minting new position...`);
     console.log(`   [Mint] Desired: ${position.mintAmounts.amount0.toString()} / ${position.mintAmounts.amount1.toString()}`);
@@ -620,5 +625,10 @@ export async function executeFullRebalance(
         tickLower,
         tickUpper
     );
-    saveState(newTokenId);
+    
+    if (newTokenId !== "0") {
+        saveState(newTokenId);
+    } else {
+        console.warn("[Strategy] Mint returned 0 ID. Keeping state as is (or 0).");
+    }
 }
