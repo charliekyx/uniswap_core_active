@@ -18,6 +18,7 @@ import { loadState, saveState, scanLocalOrphans } from "./src/state"; // [Added]
 import { approveAll, executeFullRebalance, atomicExitPosition, swapAllWethToUsdc } from "./src/actions";
 import { RobustProvider } from "./src/connection";
 import { sendEmailAlert } from "./src/utils";
+import { logAction } from "./src/logger";
 
 dotenv.config();
 
@@ -83,6 +84,7 @@ async function initialize() {
     npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
 
     console.log(`[System] Initialized.`);
+    logAction(0, "INFO", "0", 0, "System Initialized/Restarted");
 
     await approveAll(wallet);
 
@@ -152,13 +154,18 @@ async function onNewBlock(blockNumber: number) {
             Number(slot0.tick)
         );
 
+        const price = configuredPool.token0Price.toSignificant(6);
+        logAction(blockNumber, "ENTRY", price, Number(slot0.tick), "No active position. Attempting Entry.");
+
         // If executeFullRebalance throws (e.g. TWAP check failed), catch it here
         // protects app from crashing, waits for next block retry.
         try {
             await executeFullRebalance(wallet, configuredPool, "0");
+            logAction(blockNumber, "INFO", price, Number(slot0.tick), "Entry execution sent.");
         } catch (e) {
             // This is the "Judging" phase. If TWAP fails, we wait.
             console.warn(`[Strategy] Auto-reentry skipped: ${(e as any).message}. Waiting for market stability...`);
+            logAction(blockNumber, "ERROR", price, Number(slot0.tick), `Entry skipped: ${(e as any).message}`);
         }
 
         return;
@@ -184,6 +191,8 @@ async function onNewBlock(blockNumber: number) {
         liquidity.toString(),
         currentTick
     );
+    
+    const currentPrice = configuredPool.token0Price.toSignificant(6);
 
     const pos = await npm.positions(tokenId);
     if (pos.liquidity === 0n) {
@@ -194,6 +203,7 @@ async function onNewBlock(blockNumber: number) {
             console.log("[System] No orphan position found. Resetting state to 0 to trigger new entry.");
             saveState("0");
         }
+        logAction(blockNumber, "ERROR", currentPrice, currentTick, "Position found closed/liquidated externally.");
         return null;
     }
 
@@ -209,6 +219,7 @@ async function onNewBlock(blockNumber: number) {
     if (distanceFromCenter > stopLossThreshold) {
         console.warn(`[CIRCUIT BREAKER] Price has moved significantly (${distanceFromCenter} ticks) away from position center. Triggering stop-loss.`);
         await sendEmailAlert("CIRCUIT BREAKER TRIGGERED", `Price moved ${distanceFromCenter} ticks from range center. Exiting to USDC.`);
+        logAction(blockNumber, "STOP_LOSS", currentPrice, currentTick, `Circuit Breaker! Dist: ${distanceFromCenter}, Threshold: ${stopLossThreshold}`);
         
         // 1. Exit position
         await atomicExitPosition(wallet, tokenId);
@@ -230,6 +241,7 @@ async function onNewBlock(blockNumber: number) {
 
     if (currentTick < (tl - dynamicBufferTicks) || currentTick > (tu + dynamicBufferTicks)) {
         console.log(`[Strategy] Out of Range. Rebalancing...`);    
+        logAction(blockNumber, "REBALANCE", currentPrice, currentTick, `Out of range. Old Range: [${tl}, ${tu}]`);
         await executeFullRebalance(wallet, configuredPool, tokenId);
         return;
     }

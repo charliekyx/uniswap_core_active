@@ -9,3 +9,4 @@ services:
       
     volumes:
      - ./bot_state_active.json:/app/bot_state_active.json
+     - ./logs:/app/logs

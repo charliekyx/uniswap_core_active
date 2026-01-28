@@ -79,7 +79,7 @@ export async function sendEmailAlert(subject: string, text: string) {
     const mailOptions = {
         from: process.env.EMAIL_USER,
         to: process.env.EMAIL_TO,
-        subject: `[UniBot Alert] ${subject}`,
+        subject: `[UNISWAP_ACIVE] ${subject}`,
         text: text
     };
 
