@@ -354,6 +354,8 @@ export async function mintMaxLiquidity(
     };
 
     console.log(`\n[Mint] Minting new position...`);
+    console.log(`   [Mint] Desired: ${position.mintAmounts.amount0.toString()} / ${position.mintAmounts.amount1.toString()}`);
+    console.log(`   [Mint] Min: ${amount0Min.toString()} / ${amount1Min.toString()}`);
     const npm = new ethers.Contract(
         NONFUNGIBLE_POSITION_MANAGER_ADDR,
         NPM_ABI,
@@ -594,10 +596,27 @@ export async function executeFullRebalance(
     console.log("   [System] Waiting 2s for balance sync...");
     await sleep(2000);
 
+    // [Fix] Refresh pool state before minting.
+    // Price moves during the sleep/swap. Using old 'freshPool' data causes
+    // 'Price slippage check' reverts because amountMin is calculated on stale data.
+    const [finalSlot0, finalLiquidity] = await Promise.all([
+        poolContract.slot0(),
+        poolContract.liquidity(),
+    ]);
+
+    const finalPool = new Pool(
+        USDC_TOKEN,
+        WETH_TOKEN,
+        POOL_FEE,
+        finalSlot0.sqrtPriceX96.toString(),
+        finalLiquidity.toString(),
+        Number(finalSlot0.tick)
+    );
+
     // 4. Mint
     const newTokenId = await mintMaxLiquidity(
         wallet,
-        freshPool,
+        finalPool, // Use the latest pool state
         tickLower,
         tickUpper
     );
