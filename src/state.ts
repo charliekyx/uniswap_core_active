@@ -6,7 +6,6 @@ import { ethers } from "ethers";
 
 import { NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI } from "../config";
 
-
 const STATE_FILE = path.join(process.cwd(), "bot_state_active.json");
 
 export interface BotState {
@@ -40,7 +39,7 @@ export function saveState(tokenId: string) {
 export async function scanLocalOrphans(wallet: ethers.Wallet): Promise<string> {
     console.log("[State] Scanning for orphan positions...");
     const npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
-    
+
     const balance = await npm.balanceOf(wallet.address);
     if (balance === 0n) {
         console.log("[State] No on-chain positions found.");
@@ -50,12 +49,12 @@ export async function scanLocalOrphans(wallet: ethers.Wallet): Promise<string> {
     // Simple strategy: Check the last NFT owned by the wallet
     // If running multiple bots/strategies, this logic needs to be more complex
     // Right now it only manages one wallet
-    const idx = balance - 1n; 
+    const idx = balance - 1n;
     console.log(`[State] Wallet has ${balance} positions. Checking index ${idx}...`);
     const tokenId = await npm.tokenOfOwnerByIndex(wallet.address, idx);
-    
+
     const pos = await npm.positions(tokenId);
-    
+
     if (pos.liquidity > 0n) {
         console.warn(`[State] FOUND ORPHAN POSITION: ID ${tokenId} (Liq: ${pos.liquidity})`);
         console.warn(`[State] Adopting this position and updating state file.`);

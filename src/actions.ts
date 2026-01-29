@@ -31,33 +31,23 @@ import { getEthAtr, getEthRsi, getEthAdx, getEthBollingerBands } from "./analyti
 import { logAction } from "./logger";
 
 // --- Wallet Utilities ---
-export async function getBalance(
-    token: Token,
-    wallet: ethers.Wallet
-): Promise<bigint> {
+export async function getBalance(token: Token, wallet: ethers.Wallet): Promise<bigint> {
     const contract = new ethers.Contract(token.address, ERC20_ABI, wallet);
     return await withRetry(() => contract.balanceOf(wallet.address));
 }
 
 export async function approveAll(wallet: ethers.Wallet) {
     const tokens = [USDC_TOKEN, WETH_TOKEN];
-    const spenders = [
-        NONFUNGIBLE_POSITION_MANAGER_ADDR,
-        SWAP_ROUTER_ADDR,
-    ];
+    const spenders = [NONFUNGIBLE_POSITION_MANAGER_ADDR, SWAP_ROUTER_ADDR];
 
     for (const token of tokens) {
         const contract = new ethers.Contract(token.address, ERC20_ABI, wallet);
         for (const spender of spenders) {
-            const allowance = await withRetry(() =>
-                contract.allowance(wallet.address, spender)
-            );
+            const allowance = await withRetry(() => contract.allowance(wallet.address, spender));
             const threshold = ethers.MaxUint256 / 2n;
 
             if (allowance < threshold) {
-                console.log(
-                    `[Approve] Authorizing ${token.symbol} for ${spender}...`
-                );
+                console.log(`[Approve] Authorizing ${token.symbol} for ${spender}...`);
                 const tx = await contract.approve(spender, ethers.MaxUint256);
                 await waitWithTimeout(tx, TX_TIMEOUT_MS);
                 console.log(`[Approve] Success.`);
@@ -69,14 +59,10 @@ export async function approveAll(wallet: ethers.Wallet) {
 // --- Core Actions ---
 export async function atomicExitPosition(
     wallet: ethers.Wallet,
-    tokenId: string
-): Promise<{ amount0: bigint, amount1: bigint }> {
+    tokenId: string,
+): Promise<{ amount0: bigint; amount1: bigint }> {
     console.log(`\n[Exit] Executing Atomic Exit for Token ${tokenId}...`);
-    const npm = new ethers.Contract(
-        NONFUNGIBLE_POSITION_MANAGER_ADDR,
-        NPM_ABI,
-        wallet
-    );
+    const npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
 
     const pos = await withRetry(() => npm.positions(tokenId));
     const liquidity = pos.liquidity;
@@ -93,9 +79,7 @@ export async function atomicExitPosition(
             amount1Min: 0,
             deadline: Math.floor(Date.now() / 1000) + 120,
         };
-        calls.push(
-            iface.encodeFunctionData("decreaseLiquidity", [decreaseData])
-        );
+        calls.push(iface.encodeFunctionData("decreaseLiquidity", [decreaseData]));
     }
 
     // 2. Collect Fees
@@ -120,7 +104,7 @@ export async function atomicExitPosition(
         // [Analysis] Parse logs to find out how much we collected (Principal + Fees)
         let collected0 = 0n;
         let collected1 = 0n;
-        
+
         for (const log of receipt.logs) {
             try {
                 const parsed = npm.interface.parseLog(log);
@@ -128,7 +112,9 @@ export async function atomicExitPosition(
                     collected0 += parsed.args.amount0;
                     collected1 += parsed.args.amount1;
                 }
-            } catch (e) { /* ignore other events */ }
+            } catch (e) {
+                /* ignore other events */
+            }
         }
         console.log(`   [Exit] Collected: ${collected0} / ${collected1}`);
         return { amount0: collected0, amount1: collected1 };
@@ -142,7 +128,7 @@ export async function smartRebalance(
     wallet: ethers.Wallet,
     configuredPool: Pool,
     tickLower: number,
-    tickUpper: number
+    tickUpper: number,
 ) {
     console.log(`\n[Rebalance] Calculating Smart Swap for range [${tickLower}, ${tickUpper}]...`);
 
@@ -160,9 +146,9 @@ export async function smartRebalance(
         pool: configuredPool,
         tickLower,
         tickUpper,
-        amount0: MAX_UINT128.toString(), 
+        amount0: MAX_UINT128.toString(),
         amount1: MAX_UINT128.toString(),
-        useFullPrecision: true
+        useFullPrecision: true,
     });
 
     const idealAmount0 = BigInt(mockPosition.mintAmounts.amount0.toString());
@@ -178,7 +164,7 @@ export async function smartRebalance(
     // 2. Calculate Total Portfolio Value in terms of Token1 (usually USDC if Token1 is USDC)
     // This helps us determine how much of the total value should be in Token0 vs Token1
     // Note: This is an estimation.
-    
+
     // Current Balances
     const currentAmount0 = configuredPool.token0.address === WETH_TOKEN.address ? balWETH : balUSDC;
     const currentAmount1 = configuredPool.token1.address === WETH_TOKEN.address ? balWETH : balUSDC;
@@ -189,9 +175,9 @@ export async function smartRebalance(
 
     // Price of Token0 in terms of Token1 (e.g. 2600 USDC per ETH)
     const price0 = parseFloat(configuredPool.token0Price.toFixed(10));
-    
+
     // Total Portfolio Value in Token1 terms
-    const totalValue = bal1 + (bal0 * price0);
+    const totalValue = bal1 + bal0 * price0;
 
     const router = new ethers.Contract(SWAP_ROUTER_ADDR, SWAP_ROUTER_ABI, wallet);
     const quoter = new ethers.Contract(QUOTER_ADDR, QUOTER_ABI, wallet);
@@ -200,20 +186,21 @@ export async function smartRebalance(
     const calculateMinOut = (quotedAmount: bigint) => {
         const tolerance = BigInt(SLIPPAGE_TOLERANCE.numerator.toString());
         const basis = BigInt(SLIPPAGE_TOLERANCE.denominator.toString());
-        return quotedAmount * (basis - tolerance) / basis;
+        return (quotedAmount * (basis - tolerance)) / basis;
     };
 
     // 3. Calculate Target Amounts based on Ideal Ratio (Human Readable)
     const ideal0Raw = BigInt(mockPosition.mintAmounts.amount0.toString());
     const ideal1Raw = BigInt(mockPosition.mintAmounts.amount1.toString());
-    
+
     const ideal0 = parseFloat(ethers.formatUnits(ideal0Raw, configuredPool.token0.decimals));
     const ideal1 = parseFloat(ethers.formatUnits(ideal1Raw, configuredPool.token1.decimals));
-    
+
     let ratio = 0;
-    if (ideal0 === 0) ratio = Infinity; // Pure Token1 needed
+    if (ideal0 === 0)
+        ratio = Infinity; // Pure Token1 needed
     else ratio = ideal1 / ideal0;
-    
+
     // Target Amount0 formula: Value = T0 * Price + T0 * Ratio
     let target0 = 0;
     if (ratio === Infinity) target0 = 0;
@@ -221,24 +208,35 @@ export async function smartRebalance(
 
     // Convert Target back to Raw BigInt
     // Use toFixed to avoid scientific notation issues with parseUnits
-    const targetAmount0 = ethers.parseUnits(target0.toFixed(configuredPool.token0.decimals), configuredPool.token0.decimals);
+    const targetAmount0 = ethers.parseUnits(
+        target0.toFixed(configuredPool.token0.decimals),
+        configuredPool.token0.decimals,
+    );
 
     // 4. Determine Swap Direction
     if (currentAmount0 > targetAmount0) {
         // We have too much Token0 (e.g. WETH), sell difference for Token1 (USDC)
         const amountToSellRaw = currentAmount0 - targetAmount0;
-        const amountToSell = CurrencyAmount.fromRawAmount(configuredPool.token0, amountToSellRaw.toString());
+        const amountToSell = CurrencyAmount.fromRawAmount(
+            configuredPool.token0,
+            amountToSellRaw.toString(),
+        );
 
         // Threshold check (approximate based on token type)
-        const threshold = configuredPool.token0.address === USDC_TOKEN.address ? REBALANCE_THRESHOLD_USDC : REBALANCE_THRESHOLD_WETH;
-        
+        const threshold =
+            configuredPool.token0.address === USDC_TOKEN.address
+                ? REBALANCE_THRESHOLD_USDC
+                : REBALANCE_THRESHOLD_WETH;
+
         if (amountToSellRaw < threshold) {
             console.log("   Balance is good enough. Skipping swap.");
             return;
         }
-    
+
         const amountIn = BigInt(amountToSell.quotient.toString());
-        console.log(`   [Swap] Selling ${amountToSell.toSignificant(6)} ${configuredPool.token0.symbol} for ${configuredPool.token1.symbol}`);
+        console.log(
+            `   [Swap] Selling ${amountToSell.toSignificant(6)} ${configuredPool.token0.symbol} for ${configuredPool.token1.symbol}`,
+        );
 
         // 1. Quote
         const quoteParams = {
@@ -246,15 +244,19 @@ export async function smartRebalance(
             tokenOut: configuredPool.token1.address,
             amountIn: amountIn,
             fee: POOL_FEE,
-            sqrtPriceLimitX96: 0
+            sqrtPriceLimitX96: 0,
         };
         // QuoterV2 returns struct, ethers v6 parses it. First return value is amountOut.
-        const [quotedAmountOut] = await quoter.getFunction("quoteExactInputSingle").staticCall(quoteParams);
+        const [quotedAmountOut] = await quoter
+            .getFunction("quoteExactInputSingle")
+            .staticCall(quoteParams);
         const amountOutMin = calculateMinOut(quotedAmountOut);
 
-        console.log(`   [Quote] Expect: ${ethers.formatUnits(quotedAmountOut, configuredPool.token1.decimals)} ${configuredPool.token1.symbol}`);
+        console.log(
+            `   [Quote] Expect: ${ethers.formatUnits(quotedAmountOut, configuredPool.token1.decimals)} ${configuredPool.token1.symbol}`,
+        );
 
-       const tx = await router.exactInputSingle({
+        const tx = await router.exactInputSingle({
             tokenIn: configuredPool.token0.address,
             tokenOut: configuredPool.token1.address,
             fee: POOL_FEE,
@@ -267,26 +269,37 @@ export async function smartRebalance(
 
         await waitWithTimeout(tx, TX_TIMEOUT_MS);
     } else {
-        const target1 = totalValue - (target0 * price0);
-        const targetAmount1 = ethers.parseUnits(target1.toFixed(configuredPool.token1.decimals), configuredPool.token1.decimals);
-        
+        const target1 = totalValue - target0 * price0;
+        const targetAmount1 = ethers.parseUnits(
+            target1.toFixed(configuredPool.token1.decimals),
+            configuredPool.token1.decimals,
+        );
+
         if (currentAmount1 <= targetAmount1) {
-             console.log("   Balance is good enough (or deficit is negligible). Skipping swap.");
-             return;
+            console.log("   Balance is good enough (or deficit is negligible). Skipping swap.");
+            return;
         }
 
         const amountToSellRaw = currentAmount1 - targetAmount1;
-        const amountToSell = CurrencyAmount.fromRawAmount(configuredPool.token1, amountToSellRaw.toString());
+        const amountToSell = CurrencyAmount.fromRawAmount(
+            configuredPool.token1,
+            amountToSellRaw.toString(),
+        );
 
-        const threshold = configuredPool.token1.address === USDC_TOKEN.address ? REBALANCE_THRESHOLD_USDC : REBALANCE_THRESHOLD_WETH;
-        
+        const threshold =
+            configuredPool.token1.address === USDC_TOKEN.address
+                ? REBALANCE_THRESHOLD_USDC
+                : REBALANCE_THRESHOLD_WETH;
+
         if (amountToSellRaw < threshold) {
             console.log("   Balance is good enough. Skipping swap.");
             return;
         }
 
-       const amountIn = BigInt(amountToSell.quotient.toString());
-        console.log(`   [Swap] Selling ${amountToSell.toSignificant(6)} ${configuredPool.token1.symbol} for ${configuredPool.token0.symbol}`);
+        const amountIn = BigInt(amountToSell.quotient.toString());
+        console.log(
+            `   [Swap] Selling ${amountToSell.toSignificant(6)} ${configuredPool.token1.symbol} for ${configuredPool.token0.symbol}`,
+        );
 
         // 1. Quote
         const quoteParams = {
@@ -294,12 +307,16 @@ export async function smartRebalance(
             tokenOut: configuredPool.token0.address,
             amountIn: amountIn,
             fee: POOL_FEE,
-            sqrtPriceLimitX96: 0
+            sqrtPriceLimitX96: 0,
         };
-        const [quotedAmountOut] = await quoter.getFunction("quoteExactInputSingle").staticCall(quoteParams);
+        const [quotedAmountOut] = await quoter
+            .getFunction("quoteExactInputSingle")
+            .staticCall(quoteParams);
         const amountOutMin = calculateMinOut(quotedAmountOut);
 
-        console.log(`   [Quote] Expect: ${ethers.formatUnits(quotedAmountOut, configuredPool.token0.decimals)} ${configuredPool.token0.symbol}`);
+        console.log(
+            `   [Quote] Expect: ${ethers.formatUnits(quotedAmountOut, configuredPool.token0.decimals)} ${configuredPool.token0.symbol}`,
+        );
 
         const tx = await router.exactInputSingle({
             tokenIn: configuredPool.token1.address,
@@ -320,22 +337,16 @@ export async function mintMaxLiquidity(
     wallet: ethers.Wallet,
     configuredPool: Pool,
     tickLower: number,
-    tickUpper: number
+    tickUpper: number,
 ): Promise<string> {
     const balUSDC = await getBalance(USDC_TOKEN, wallet);
     const balWETH = await getBalance(WETH_TOKEN, wallet);
 
-    const amount0Input =
-        configuredPool.token0.address === WETH_TOKEN.address
-            ? balWETH
-            : balUSDC;
-    const amount1Input =
-        configuredPool.token1.address === WETH_TOKEN.address
-            ? balWETH
-            : balUSDC;
+    const amount0Input = configuredPool.token0.address === WETH_TOKEN.address ? balWETH : balUSDC;
+    const amount1Input = configuredPool.token1.address === WETH_TOKEN.address ? balWETH : balUSDC;
 
     // [Optimized] 99% Buffer (was 99.9%)
-    // Lowered to 99% to prevent "Transfer amount exceeds balance" errors due to 
+    // Lowered to 99% to prevent "Transfer amount exceeds balance" errors due to
     // tiny dust issues or RPC balance sync lags.
     const amount0Safe = (amount0Input * 990n) / 1000n;
     const amount1Safe = (amount1Input * 990n) / 1000n;
@@ -370,18 +381,18 @@ export async function mintMaxLiquidity(
 
     // [Safety] Check for Zero Amounts to prevent Reverts
     if (BigInt(mintParams.amount0Desired) === 0n && BigInt(mintParams.amount1Desired) === 0n) {
-        console.warn(`[Mint] Aborting: Calculated mint amounts are ZERO. (Check WETH/USDC balances)`);
+        console.warn(
+            `[Mint] Aborting: Calculated mint amounts are ZERO. (Check WETH/USDC balances)`,
+        );
         return "0";
     }
 
     console.log(`\n[Mint] Minting new position...`);
-    console.log(`   [Mint] Desired: ${position.mintAmounts.amount0.toString()} / ${position.mintAmounts.amount1.toString()}`);
-    console.log(`   [Mint] Min: ${amount0Min.toString()} / ${amount1Min.toString()}`);
-    const npm = new ethers.Contract(
-        NONFUNGIBLE_POSITION_MANAGER_ADDR,
-        NPM_ABI,
-        wallet
+    console.log(
+        `   [Mint] Desired: ${position.mintAmounts.amount0.toString()} / ${position.mintAmounts.amount1.toString()}`,
     );
+    console.log(`   [Mint] Min: ${amount0Min.toString()} / ${amount1Min.toString()}`);
+    const npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
     const tx = await npm.mint(mintParams, { gasLimit: 1_000_000 });
     const receipt = await waitWithTimeout(tx, TX_TIMEOUT_MS);
 
@@ -391,7 +402,7 @@ export async function mintMaxLiquidity(
         if (log.topics[0] !== transferEventSig) return false;
 
         try {
-            const toAddress = ethers.dataSlice(log.topics[2], 12); 
+            const toAddress = ethers.dataSlice(log.topics[2], 12);
             return ethers.getAddress(toAddress) === wallet.address;
         } catch {
             return false;
@@ -400,7 +411,7 @@ export async function mintMaxLiquidity(
 
     if (!transferLog) {
         throw new Error(
-            "Mint successful but failed to parse Token ID from logs (Transfer event not found)."
+            "Mint successful but failed to parse Token ID from logs (Transfer event not found).",
         );
     }
 
@@ -414,7 +425,8 @@ export async function swapAllWethToUsdc(wallet: ethers.Wallet) {
     console.log(`\n[CircuitBreaker] Swapping all remaining WETH to USDC...`);
     const balWETH = await getBalance(WETH_TOKEN, wallet);
 
-    if (balWETH < REBALANCE_THRESHOLD_WETH) { // Use a threshold to avoid dust swaps
+    if (balWETH < REBALANCE_THRESHOLD_WETH) {
+        // Use a threshold to avoid dust swaps
         console.log(`   Negligible WETH balance. Skipping swap.`);
         return;
     }
@@ -428,16 +440,20 @@ export async function swapAllWethToUsdc(wallet: ethers.Wallet) {
         tokenOut: USDC_TOKEN.address,
         amountIn: balWETH,
         fee: POOL_FEE,
-        sqrtPriceLimitX96: 0
+        sqrtPriceLimitX96: 0,
     };
-    const [quotedAmountOut] = await quoter.getFunction("quoteExactInputSingle").staticCall(quoteParams);
-    
+    const [quotedAmountOut] = await quoter
+        .getFunction("quoteExactInputSingle")
+        .staticCall(quoteParams);
+
     // Slippage
     const tolerance = BigInt(SLIPPAGE_TOLERANCE.numerator.toString());
     const basis = BigInt(SLIPPAGE_TOLERANCE.denominator.toString());
-    const amountOutMin = quotedAmountOut * (basis - tolerance) / basis;
+    const amountOutMin = (quotedAmountOut * (basis - tolerance)) / basis;
 
-    console.log(`   [Swap] Selling ${ethers.formatEther(balWETH)} WETH for ~${ethers.formatUnits(quotedAmountOut, 6)} USDC.`);
+    console.log(
+        `   [Swap] Selling ${ethers.formatEther(balWETH)} WETH for ~${ethers.formatUnits(quotedAmountOut, 6)} USDC.`,
+    );
 
     const tx = await router.exactInputSingle({
         tokenIn: WETH_TOKEN.address,
@@ -459,7 +475,7 @@ export async function executeFullRebalance(
     wallet: ethers.Wallet,
     configuredPool: Pool,
     oldTokenId: string,
-    blockNumber: number
+    blockNumber: number,
 ) {
     console.log(`[Rebalance] Starting full rebalance sequence...`);
 
@@ -472,20 +488,24 @@ export async function executeFullRebalance(
         // Get TWAP Tick for the last 5 minutes (300 seconds)
         const twapTick = Number(await getPoolTwap(poolContract, 300));
         const currentTick = configuredPool.tickCurrent;
-        
+
         // Calculate tick difference
         const tickDiff = Math.abs(currentTick - twapTick);
-        
+
         // 1% price deviation is roughly 100 ticks (Basis Points)
         // Threshold: If Spot deviates from TWAP by more than 200 ticks (~2%), reject the trade.
-        const MAX_TICK_DEVIATION = 200; 
+        const MAX_TICK_DEVIATION = 200;
 
-        console.log(`   [Safety] Spot Tick: ${currentTick} | TWAP Tick: ${twapTick} | Diff: ${tickDiff}`);
+        console.log(
+            `   [Safety] Spot Tick: ${currentTick} | TWAP Tick: ${twapTick} | Diff: ${tickDiff}`,
+        );
 
         if (tickDiff > MAX_TICK_DEVIATION) {
             const msg = `Price manipulation detected! Spot price deviates from TWAP by ${tickDiff} ticks.`;
             await sendEmailAlert("TWAP Check Failed", msg);
-            throw new Error(`Price manipulation detected! Spot price deviates from TWAP by ${tickDiff} ticks.`);
+            throw new Error(
+                `Price manipulation detected! Spot price deviates from TWAP by ${tickDiff} ticks.`,
+            );
         }
     } catch (e) {
         console.error("   [Safety] TWAP check failed:", e);
@@ -493,7 +513,6 @@ export async function executeFullRebalance(
         throw e; // Must throw exception to stop further operations
     }
 
-    
     console.log("   [Strategy] Pre-fetching market analytics (Multi-Timeframe)...");
     let atr15m, rsi1h, adx15m, bb1h;
     try {
@@ -501,11 +520,15 @@ export async function executeFullRebalance(
             getEthAtr("15m"),
             getEthRsi("1h"), // [Resonance] Use 1h RSI for broader sentiment
             getEthAdx("15m"),
-            getEthBollingerBands("1h") // [New] 1h Bollinger Bands
+            getEthBollingerBands("1h"), // [New] 1h Bollinger Bands
         ]);
-        console.log(`   [Strategy] Data acquired. ATR(15m): ${atr15m}, RSI(1h): ${rsi1h}, ADX(15m): ${adx15m}, BB(1h): [${bb1h.lower.toFixed(2)}, ${bb1h.upper.toFixed(2)}]`);
+        console.log(
+            `   [Strategy] Data acquired. ATR(15m): ${atr15m}, RSI(1h): ${rsi1h}, ADX(15m): ${adx15m}, BB(1h): [${bb1h.lower.toFixed(2)}, ${bb1h.upper.toFixed(2)}]`,
+        );
     } catch (e) {
-        console.error("   [Strategy] Failed to fetch market data. Aborting rebalance to keep old position safe.");
+        console.error(
+            "   [Strategy] Failed to fetch market data. Aborting rebalance to keep old position safe.",
+        );
         throw e; // keep old position
     }
 
@@ -531,7 +554,7 @@ export async function executeFullRebalance(
         POOL_FEE,
         newSlot0.sqrtPriceX96.toString(),
         newLiquidity.toString(),
-        newCurrentTick
+        newCurrentTick,
     );
 
     console.log(`   [Update] Tick: ${newCurrentTick}`);
@@ -552,7 +575,7 @@ export async function executeFullRebalance(
     // Uses 1h RSI to determine if the broader market is overextended
     // Formula: 1.0 + (max(0, |RSI(1h) - 50| - 5) / 20)
     const rsiDeviation = Math.max(0, Math.abs(rsi1h - 50) - 5);
-    const dynamicAtrFactor = 1.0 + (rsiDeviation / 20);
+    const dynamicAtrFactor = 1.0 + rsiDeviation / 20;
     let dynamicWidth = Math.floor(volPercent * 100 * dynamicAtrFactor);
 
     // [Trend Filter] Linear ADX Scaling
@@ -563,24 +586,25 @@ export async function executeFullRebalance(
     const adxMultiplier = adx15m > 25 ? 1.0 + (adx15m - 25) * 0.04 : 1.0;
 
     if (adxMultiplier > 1.0) {
-        console.log(`   [Strategy] Trend Detected (ADX: ${adx15m.toFixed(2)}). Widening range by ${adxMultiplier.toFixed(2)}x.`);
+        console.log(
+            `   [Strategy] Trend Detected (ADX: ${adx15m.toFixed(2)}). Widening range by ${adxMultiplier.toFixed(2)}x.`,
+        );
         dynamicWidth = Math.floor(dynamicWidth * adxMultiplier);
     }
 
     console.log(
-        `   [Strategy] ATR(15m): $${atr15m.toFixed(2)} | Vol: ${volPercent.toFixed(2)}% | Factor(1h): ${dynamicAtrFactor.toFixed(2)} | ADX(15m): ${adxMultiplier.toFixed(2)}x | Calc Width: ${dynamicWidth}`
+        `   [Strategy] ATR(15m): $${atr15m.toFixed(2)} | Vol: ${volPercent.toFixed(2)}% | Factor(1h): ${dynamicAtrFactor.toFixed(2)} | ADX(15m): ${adxMultiplier.toFixed(2)}x | Calc Width: ${dynamicWidth}`,
     );
 
     // [Optimization] Increased floor to 200 to prevent over-trading.
     // 200 ticks radius = +/- 2% range.
-    const WIDTH = Math.max(200, Math.min(dynamicWidth, 4000)); 
+    const WIDTH = Math.max(200, Math.min(dynamicWidth, 4000));
 
     console.log(`   [Strategy] Base Radius Width: ${WIDTH}`);
 
     const tickSpace = freshPool.tickSpacing;
     const MIN_TICK = -887272;
     const MAX_TICK = 887272;
-
 
     // [Dynamic Skew] Non-linear Skew with Dead Zone [40, 60]
     // Uses 1h RSI to set the directional bias
@@ -598,29 +622,31 @@ export async function executeFullRebalance(
     // If price touches Upper Band -> Extreme Overbought -> Force Skew 0.2
     // If price touches Lower Band -> Extreme Oversold -> Force Skew 0.8
     if (currentPrice >= bb1h.upper) {
-        console.log(`   [Strategy] Price ($${currentPrice}) >= 1h BB Upper ($${bb1h.upper.toFixed(2)}). Forcing Bearish Skew 0.2.`);
+        console.log(
+            `   [Strategy] Price ($${currentPrice}) >= 1h BB Upper ($${bb1h.upper.toFixed(2)}). Forcing Bearish Skew 0.2.`,
+        );
         skew = 0.2;
     } else if (currentPrice <= bb1h.lower) {
-        console.log(`   [Strategy] Price ($${currentPrice}) <= 1h BB Lower ($${bb1h.lower.toFixed(2)}). Forcing Bullish Skew 0.8.`);
+        console.log(
+            `   [Strategy] Price ($${currentPrice}) <= 1h BB Lower ($${bb1h.lower.toFixed(2)}). Forcing Bullish Skew 0.8.`,
+        );
         skew = 0.8;
     }
 
-    console.log(`   [Strategy] RSI(1h): ${rsi1h.toFixed(2)} | BB Check -> Final Skew: ${skew.toFixed(3)}`);
+    console.log(
+        `   [Strategy] RSI(1h): ${rsi1h.toFixed(2)} | BB Check -> Final Skew: ${skew.toFixed(3)}`,
+    );
 
     const totalSpan = WIDTH * 2;
 
     const upperTickDiff = Math.floor(totalSpan * skew);
     const lowerTickDiff = Math.floor(totalSpan * (1 - skew));
 
-    let tickLower =
-        Math.floor((newCurrentTick - lowerTickDiff) / tickSpace) * tickSpace;
-    let tickUpper =
-        Math.floor((newCurrentTick + upperTickDiff) / tickSpace) * tickSpace;
+    let tickLower = Math.floor((newCurrentTick - lowerTickDiff) / tickSpace) * tickSpace;
+    let tickUpper = Math.floor((newCurrentTick + upperTickDiff) / tickSpace) * tickSpace;
 
-    if (tickLower < MIN_TICK)
-        tickLower = Math.ceil(MIN_TICK / tickSpace) * tickSpace;
-    if (tickUpper > MAX_TICK)
-        tickUpper = Math.floor(MAX_TICK / tickSpace) * tickSpace;
+    if (tickLower < MIN_TICK) tickLower = Math.ceil(MIN_TICK / tickSpace) * tickSpace;
+    if (tickUpper > MAX_TICK) tickUpper = Math.floor(MAX_TICK / tickSpace) * tickSpace;
 
     if (tickLower >= tickUpper) {
         tickUpper = tickLower + tickSpace;
@@ -634,7 +660,7 @@ export async function executeFullRebalance(
     console.log(
         `   New Range: [${tickLower}, ${tickUpper}] (Skew: ${skew}, Span: ${
             tickUpper - tickLower
-        })`
+        })`,
     );
 
     // [Log Strategy Metrics]
@@ -648,8 +674,11 @@ export async function executeFullRebalance(
         await smartRebalance(wallet, freshPool, tickLower, tickUpper);
     } catch (e) {
         console.error("   [Rebalance] Swap failed:", e);
-        await sendEmailAlert("Rebalance Swap Failed", `Swap likely reverted due to Slippage or Gas: ${e}`);
-        throw e; 
+        await sendEmailAlert(
+            "Rebalance Swap Failed",
+            `Swap likely reverted due to Slippage or Gas: ${e}`,
+        );
+        throw e;
     }
 
     // [Safety] Wait 2 seconds for RPC nodes to sync the new balances after the Swap.
@@ -661,16 +690,16 @@ export async function executeFullRebalance(
     // This gives us the most accurate "Net Worth" snapshot.
     const [balUSDC, balWETH] = await Promise.all([
         getBalance(USDC_TOKEN, wallet),
-        getBalance(WETH_TOKEN, wallet)
+        getBalance(WETH_TOKEN, wallet),
     ]);
 
     const token0 = freshPool.token0;
     const token1 = freshPool.token1;
-    
+
     // Determine ETH Price in USD
     // If Token0 is WETH, price is USDC/WETH. If Token1 is WETH, price is USDC/WETH.
     // We assume the other token is USDC.
-    const ethPrice = (token0.symbol?.includes('ETH')) 
+    const ethPrice = token0.symbol?.includes("ETH")
         ? parseFloat(freshPool.token0Price.toSignificant(6))
         : parseFloat(freshPool.token1Price.toSignificant(6));
 
@@ -692,7 +721,7 @@ export async function executeFullRebalance(
         POOL_FEE,
         finalSlot0.sqrtPriceX96.toString(),
         finalLiquidity.toString(),
-        Number(finalSlot0.tick)
+        Number(finalSlot0.tick),
     );
 
     // 4. Mint
@@ -700,16 +729,16 @@ export async function executeFullRebalance(
         wallet,
         finalPool, // Use the latest pool state
         tickLower,
-        tickUpper
+        tickUpper,
     );
-    
+
     if (newTokenId !== "0") {
         saveState(newTokenId);
-        
+
         // Format Human-Readable Report
         const exit0 = parseFloat(ethers.formatUnits(exitInfo.amount0, token0.decimals)).toFixed(4);
         const exit1 = parseFloat(ethers.formatUnits(exitInfo.amount1, token1.decimals)).toFixed(2);
-        
+
         const msg = `
 Strategy Rebalanced Successfully!
 
@@ -725,12 +754,9 @@ Current Price: $${ethPrice.toFixed(2)}
 [Portfolio Snapshot]
 Total Value: $${totalValueUsd.toFixed(2)}
 Held: ${parseFloat(ethers.formatUnits(balWETH, 18)).toFixed(4)} WETH + ${parseFloat(ethers.formatUnits(balUSDC, 6)).toFixed(2)} USDC
-        `.trim();
+`.trim();
 
-        await sendEmailAlert(
-            `Rebalance Success - $${totalValueUsd.toFixed(0)}`,
-            msg
-        );
+        await sendEmailAlert(`Rebalance Success - $${totalValueUsd.toFixed(0)}`, msg);
     } else {
         console.warn("[Strategy] Mint returned 0 ID. Keeping state as is (or 0).");
     }

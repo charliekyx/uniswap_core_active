@@ -8,7 +8,7 @@ import { MAX_RETRIES } from "../config";
 // Returns the time-weighted average tick for the specified interval.
 export async function getPoolTwap(
     poolContract: ethers.Contract,
-    twapInterval: number = 300 // Default: 5 minutes (300 seconds)
+    twapInterval: number = 300, // Default: 5 minutes (300 seconds)
 ): Promise<bigint> {
     // observe takes an array of secondsAgos: [twapInterval, 0]
     // Returns corresponding tickCumulatives
@@ -19,7 +19,7 @@ export async function getPoolTwap(
 
     // Average Tick = (TickCumulative_Now - TickCumulative_Before) / TimeInterval
     const timeWeightedAverageTick = Number(
-        (tickCumulativeNow - tickCumulativeBefore) / BigInt(twapInterval)
+        (tickCumulativeNow - tickCumulativeBefore) / BigInt(twapInterval),
     );
 
     // Return the tick directly for easier comparison
@@ -46,7 +46,7 @@ export async function withRetry<T>(operation: () => Promise<T>, retries = MAX_RE
 
 export async function waitWithTimeout(
     tx: ethers.ContractTransactionResponse,
-    timeoutMs: number
+    timeoutMs: number,
 ): Promise<ethers.ContractTransactionReceipt> {
     console.log(`[Tx] Waiting for confirmation: ${tx.hash}`);
 
@@ -61,13 +61,12 @@ export async function waitWithTimeout(
     return receipt as ethers.ContractTransactionReceipt;
 }
 
-
 const transporter = nodemailer.createTransport({
-    service: process.env.EMAIL_SERVICE || 'gmail',
+    service: process.env.EMAIL_SERVICE || "gmail",
     auth: {
         user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-    }
+        pass: process.env.EMAIL_PASS,
+    },
 });
 
 export async function sendEmailAlert(subject: string, text: string) {
@@ -80,7 +79,7 @@ export async function sendEmailAlert(subject: string, text: string) {
         from: process.env.EMAIL_USER,
         to: process.env.EMAIL_TO,
         subject: `[UNISWAP_ACIVE] ${subject}`,
-        text: text
+        text: text,
     };
 
     try {

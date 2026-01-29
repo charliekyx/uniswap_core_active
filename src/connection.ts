@@ -7,13 +7,13 @@ export class RobustProvider {
     private provider: ethers.WebSocketProvider | ethers.JsonRpcProvider;
     private pingInterval: NodeJS.Timeout | null = null;
     private reconnectCallback: () => void;
-    
+
     // Constructor accepts an array of URLs
     constructor(urls: string[], onReconnect: () => void) {
         if (urls.length === 0) throw new Error("No RPC URLs provided");
         this.urls = urls;
         this.reconnectCallback = onReconnect;
-        
+
         // Initialize the first node
         this.provider = this.initProvider(this.urls[0]);
     }
@@ -21,7 +21,7 @@ export class RobustProvider {
     // Initialize with a specific URL
     private initProvider(url: string) {
         const isWs = url.startsWith("ws");
-        console.log(`[Network] Initializing Provider: ${url} (Type: ${isWs ? 'WS' : 'HTTP'})...`);
+        console.log(`[Network] Initializing Provider: ${url} (Type: ${isWs ? "WS" : "HTTP"})...`);
 
         if (isWs) {
             const provider = new ethers.WebSocketProvider(url);
@@ -34,9 +34,7 @@ export class RobustProvider {
 
             // Close Handling
             (provider.websocket as any).onclose = (code: any) => {
-                console.warn(
-                    `[Network] WebSocket Closed (Code: ${code}). Switching node...`
-                );
+                console.warn(`[Network] WebSocket Closed (Code: ${code}). Switching node...`);
                 this.triggerNextProvider();
             };
 
@@ -78,14 +76,18 @@ export class RobustProvider {
         this.currentUrlIndex = (this.currentUrlIndex + 1) % this.urls.length;
         const nextUrl = this.urls[this.currentUrlIndex];
 
-        console.log(`[Network] Switching to next RPC node [${this.currentUrlIndex + 1}/${this.urls.length}]: ${nextUrl}`);
-        sendEmailAlert(`[Network] switching`, `switch to ${nextUrl}`)
+        console.log(
+            `[Network] Switching to next RPC node [${this.currentUrlIndex + 1}/${this.urls.length}]: ${nextUrl}`,
+        );
+        sendEmailAlert(`[Network] switching`, `switch to ${nextUrl}`);
 
         // Destroy old connection (if WS)
         if (this.provider instanceof ethers.WebSocketProvider) {
             try {
-                await this.provider.destroy(); 
-            } catch (e) { /* ignore */ }
+                await this.provider.destroy();
+            } catch (e) {
+                /* ignore */
+            }
         }
 
         this.provider = this.initProvider(nextUrl);

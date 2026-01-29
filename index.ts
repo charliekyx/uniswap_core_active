@@ -15,7 +15,12 @@ import {
 } from "./config";
 
 import { loadState, saveState, scanLocalOrphans } from "./src/state"; // [Added] scanLocalOrphans
-import { approveAll, executeFullRebalance, atomicExitPosition, swapAllWethToUsdc } from "./src/actions";
+import {
+    approveAll,
+    executeFullRebalance,
+    atomicExitPosition,
+    swapAllWethToUsdc,
+} from "./src/actions";
 import { RobustProvider } from "./src/connection";
 import { sendEmailAlert } from "./src/utils";
 import { logAction } from "./src/logger";
@@ -38,7 +43,10 @@ const MIN_INTERVAL_MS = 3000; // 3s
 
 async function initialize() {
     const rpcEnv = process.env.RPC_URL || "";
-    const rpcUrls = rpcEnv.split(',').map(u => u.trim()).filter(u => u.length > 0);
+    const rpcUrls = rpcEnv
+        .split(",")
+        .map((u) => u.trim())
+        .filter((u) => u.length > 0);
 
     if (rpcUrls.length === 0) {
         throw new Error("RPC_URL is not set in .env");
@@ -49,28 +57,28 @@ async function initialize() {
     // Initialize Robust WebSocket Provider with Fallback
     robustProvider = new RobustProvider(rpcUrls, async () => {
         console.log("[System] Provider switched/reconnected. Re-binding events...");
-        
+
         provider = robustProvider.getProvider();
-        
+
         // [Important] Wallet also needs to reconnect to the new Provider, otherwise transactions will fail with Network Error
         // Note: Since wallet is a global variable, we need to update its provider
-       const newWallet = wallet.connect(provider);
+        const newWallet = wallet.connect(provider);
 
         const userAddress = await newWallet.getAddress();
         (newWallet as any).address = userAddress;
-        
+
         wallet = newWallet as any;
-        
+
         poolContract = poolContract.connect(provider) as ethers.Contract;
-        npm = npm.connect(wallet) as ethers.Contract; 
+        npm = npm.connect(wallet) as ethers.Contract;
 
         console.log("[System] Contracts and Managers re-linked to new provider.");
-        
+
         await setupEventListeners();
     });
 
     provider = robustProvider.getProvider();
-    
+
     // [Note] When initializing wallet here
     const baseWallet = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
     const managedWallet = new NonceManager(baseWallet);
@@ -78,7 +86,7 @@ async function initialize() {
     wallet = managedWallet as any;
 
     console.log(`[System] Wallet initialized: ${await wallet.getAddress()}`);
-    
+
     const poolAddr = Pool.getAddress(USDC_TOKEN, WETH_TOKEN, POOL_FEE, undefined, V3_FACTORY_ADDR);
     poolContract = new ethers.Contract(poolAddr, POOL_ABI, provider);
     npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
@@ -103,11 +111,13 @@ async function setupEventListeners() {
     console.log("[System] Listening for blocks...");
 
     provider.on("block", async (blockNumber) => {
-
         // Safe Mode Check
         if (isSafeMode) {
-            if (blockNumber % 100 === 0) { // Reduce log noise
-                console.warn(`[SafeMode] Bot is in SAFE MODE. No actions taken. Block: ${blockNumber}`);
+            if (blockNumber % 100 === 0) {
+                // Reduce log noise
+                console.warn(
+                    `[SafeMode] Bot is in SAFE MODE. No actions taken. Block: ${blockNumber}`,
+                );
             }
             return;
         }
@@ -116,23 +126,23 @@ async function setupEventListeners() {
         isProcessing = true;
 
         const now = Date.now();
-        
+
         if (now - lastRunTime < MIN_INTERVAL_MS) {
-            console.log("[rpc limit]: skip less than")
-            return; 
+            console.log("[rpc limit]: skip less than");
+            return;
         }
 
         try {
-            lastRunTime = now; 
+            lastRunTime = now;
             await onNewBlock(blockNumber);
         } catch (e: any) {
             console.error(`[Block ${blockNumber}] Error:`, e);
-            
+
             // Auto-switch provider on network/rate-limit errors
             const errStr = e.toString().toLowerCase();
             if (
-                errStr.includes("too many requests") || 
-                errStr.includes("429") || 
+                errStr.includes("too many requests") ||
+                errStr.includes("429") ||
                 errStr.includes("bad_data") ||
                 errStr.includes("timeout")
             ) {
@@ -163,11 +173,17 @@ async function onNewBlock(blockNumber: number) {
             POOL_FEE,
             slot0.sqrtPriceX96.toString(),
             liquidity.toString(),
-            Number(slot0.tick)
+            Number(slot0.tick),
         );
 
         const price = configuredPool.token0Price.toSignificant(6);
-        logAction(blockNumber, "ENTRY", price, Number(slot0.tick), "No active position. Attempting Entry.");
+        logAction(
+            blockNumber,
+            "ENTRY",
+            price,
+            Number(slot0.tick),
+            "No active position. Attempting Entry.",
+        );
 
         // If executeFullRebalance throws (e.g. TWAP check failed), catch it here
         // protects app from crashing, waits for next block retry.
@@ -176,8 +192,16 @@ async function onNewBlock(blockNumber: number) {
             logAction(blockNumber, "INFO", price, Number(slot0.tick), "Entry execution sent.");
         } catch (e) {
             // This is the "Judging" phase. If TWAP fails, we wait.
-            console.warn(`[Strategy] Auto-reentry skipped: ${(e as any).message}. Waiting for market stability...`);
-            logAction(blockNumber, "ERROR", price, Number(slot0.tick), `Entry skipped: ${(e as any).message}`);
+            console.warn(
+                `[Strategy] Auto-reentry skipped: ${(e as any).message}. Waiting for market stability...`,
+            );
+            logAction(
+                blockNumber,
+                "ERROR",
+                price,
+                Number(slot0.tick),
+                `Entry skipped: ${(e as any).message}`,
+            );
         }
 
         return;
@@ -189,10 +213,7 @@ async function onNewBlock(blockNumber: number) {
 
     console.log(`[Block ${blockNumber}] Running Strategy Logic...`);
 
-    const [slot0, liquidity] = await Promise.all([
-        poolContract.slot0(),
-        poolContract.liquidity(),
-    ]);
+    const [slot0, liquidity] = await Promise.all([poolContract.slot0(), poolContract.liquidity()]);
 
     const currentTick = Number(slot0.tick);
     const configuredPool = new Pool(
@@ -201,21 +222,29 @@ async function onNewBlock(blockNumber: number) {
         POOL_FEE,
         slot0.sqrtPriceX96.toString(),
         liquidity.toString(),
-        currentTick
+        currentTick,
     );
-    
+
     const currentPrice = configuredPool.token0Price.toSignificant(6);
 
     const pos = await npm.positions(tokenId);
     if (pos.liquidity === 0n) {
         await sendEmailAlert("CRITICAL: Position Closed.", `ID: ${tokenId}`);
         // Mark as orphan or reset
-        const foundId = await scanLocalOrphans(wallet); 
+        const foundId = await scanLocalOrphans(wallet);
         if (foundId === "0") {
-            console.log("[System] No orphan position found. Resetting state to 0 to trigger new entry.");
+            console.log(
+                "[System] No orphan position found. Resetting state to 0 to trigger new entry.",
+            );
             saveState("0");
         }
-        logAction(blockNumber, "ERROR", currentPrice, currentTick, "Position found closed/liquidated externally.");
+        logAction(
+            blockNumber,
+            "ERROR",
+            currentPrice,
+            currentTick,
+            "Position found closed/liquidated externally.",
+        );
         return null;
     }
 
@@ -229,19 +258,32 @@ async function onNewBlock(blockNumber: number) {
     const stopLossThreshold = positionWidth * CIRCUIT_BREAKER_DEVIATION_FACTOR;
 
     if (distanceFromCenter > stopLossThreshold) {
-        console.warn(`[CIRCUIT BREAKER] Price has moved significantly (${distanceFromCenter} ticks) away from position center. Triggering stop-loss.`);
-        await sendEmailAlert("CIRCUIT BREAKER TRIGGERED", `Price moved ${distanceFromCenter} ticks from range center. Exiting to USDC.`);
-        logAction(blockNumber, "STOP_LOSS", currentPrice, currentTick, `Circuit Breaker! Dist: ${distanceFromCenter}, Threshold: ${stopLossThreshold}`);
-        
+        console.warn(
+            `[CIRCUIT BREAKER] Price has moved significantly (${distanceFromCenter} ticks) away from position center. Triggering stop-loss.`,
+        );
+        await sendEmailAlert(
+            "CIRCUIT BREAKER TRIGGERED",
+            `Price moved ${distanceFromCenter} ticks from range center. Exiting to USDC.`,
+        );
+        logAction(
+            blockNumber,
+            "STOP_LOSS",
+            currentPrice,
+            currentTick,
+            `Circuit Breaker! Dist: ${distanceFromCenter}, Threshold: ${stopLossThreshold}`,
+        );
+
         // 1. Exit position
         await atomicExitPosition(wallet, tokenId);
-        
+
         // 2. Swap all WETH to USDC
         await swapAllWethToUsdc(wallet);
-        
+
         // 3. Clear state and enter safe mode
         saveState("0");
-        console.warn(`[CIRCUIT BREAKER] Position closed. Bot will continue running and attempt to re-enter when market conditions stabilize.`);
+        console.warn(
+            `[CIRCUIT BREAKER] Position closed. Bot will continue running and attempt to re-enter when market conditions stabilize.`,
+        );
         return;
     }
 
@@ -251,9 +293,15 @@ async function onNewBlock(blockNumber: number) {
     const dynamicBufferTicks = Math.floor(positionWidth * REBALANCE_BUFFER_FACTOR);
     console.log(`   [Safety] Using dynamic rebalance buffer of ${dynamicBufferTicks} ticks.`);
 
-    if (currentTick < (tl - dynamicBufferTicks) || currentTick > (tu + dynamicBufferTicks)) {
-        console.log(`[Strategy] Out of Range. Rebalancing...`);    
-        logAction(blockNumber, "REBALANCE", currentPrice, currentTick, `Out of range. Old Range: [${tl}, ${tu}]`);
+    if (currentTick < tl - dynamicBufferTicks || currentTick > tu + dynamicBufferTicks) {
+        console.log(`[Strategy] Out of Range. Rebalancing...`);
+        logAction(
+            blockNumber,
+            "REBALANCE",
+            currentPrice,
+            currentTick,
+            `Out of range. Old Range: [${tl}, ${tu}]`,
+        );
         await executeFullRebalance(wallet, configuredPool, tokenId, blockNumber);
         return;
     }
