@@ -21,14 +21,14 @@ import {
     RSI_OVERSOLD,
     REBALANCE_THRESHOLD_USDC,
     REBALANCE_THRESHOLD_WETH,
-    ATR_SAFETY_FACTOR,
     QUOTER_ADDR,
     QUOTER_ABI,
 } from "../config";
 
 import { withRetry, waitWithTimeout, getPoolTwap, sendEmailAlert, sleep } from "./utils";
 import { saveState } from "./state";
-import { getEthAtr, getEthRsi } from "./analytics";
+import { getEthAtr, getEthRsi, getEthAdx, getEthBollingerBands } from "./analytics";
+import { logAction } from "./logger";
 
 // --- Wallet Utilities ---
 export async function getBalance(
@@ -458,7 +458,8 @@ export async function swapAllWethToUsdc(wallet: ethers.Wallet) {
 export async function executeFullRebalance(
     wallet: ethers.Wallet,
     configuredPool: Pool,
-    oldTokenId: string
+    oldTokenId: string,
+    blockNumber: number
 ) {
     console.log(`[Rebalance] Starting full rebalance sequence...`);
 
@@ -493,14 +494,16 @@ export async function executeFullRebalance(
     }
 
     
-    console.log("   [Strategy] Pre-fetching market analytics...");
-    let atr, rsi;
+    console.log("   [Strategy] Pre-fetching market analytics (Multi-Timeframe)...");
+    let atr15m, rsi1h, adx15m, bb1h;
     try {
-        [atr, rsi] = await Promise.all([
+        [atr15m, rsi1h, adx15m, bb1h] = await Promise.all([
             getEthAtr("15m"),
-            getEthRsi("15m")
+            getEthRsi("1h"), // [Resonance] Use 1h RSI for broader sentiment
+            getEthAdx("15m"),
+            getEthBollingerBands("1h") // [New] 1h Bollinger Bands
         ]);
-        console.log(`   [Strategy] Data acquired. ATR: ${atr}, RSI: ${rsi}`);
+        console.log(`   [Strategy] Data acquired. ATR(15m): ${atr15m}, RSI(1h): ${rsi1h}, ADX(15m): ${adx15m}, BB(1h): [${bb1h.lower.toFixed(2)}, ${bb1h.upper.toFixed(2)}]`);
     } catch (e) {
         console.error("   [Strategy] Failed to fetch market data. Aborting rebalance to keep old position safe.");
         throw e; // keep old position
@@ -543,12 +546,29 @@ export async function executeFullRebalance(
             : freshPool.token1Price.toSignificant(6);
     const currentPrice = parseFloat(priceStr);
 
-    const volPercent = (atr / currentPrice) * 100;
+    const volPercent = (atr15m / currentPrice) * 100;
 
-    let dynamicWidth = Math.floor(volPercent * 100 * ATR_SAFETY_FACTOR);
+    // [Dynamic Factor] Factor with Dead Zone [45, 55]
+    // Uses 1h RSI to determine if the broader market is overextended
+    // Formula: 1.0 + (max(0, |RSI(1h) - 50| - 5) / 20)
+    const rsiDeviation = Math.max(0, Math.abs(rsi1h - 50) - 5);
+    const dynamicAtrFactor = 1.0 + (rsiDeviation / 20);
+    let dynamicWidth = Math.floor(volPercent * 100 * dynamicAtrFactor);
+
+    // [Trend Filter] Linear ADX Scaling
+    // Uses 15m ADX to react to immediate trend explosions
+    // ADX 25 -> 1.0x (No adjustment)
+    // ADX 50 -> 2.0x (Double width)
+    // Slope: 0.04 per unit above 25
+    const adxMultiplier = adx15m > 25 ? 1.0 + (adx15m - 25) * 0.04 : 1.0;
+
+    if (adxMultiplier > 1.0) {
+        console.log(`   [Strategy] Trend Detected (ADX: ${adx15m.toFixed(2)}). Widening range by ${adxMultiplier.toFixed(2)}x.`);
+        dynamicWidth = Math.floor(dynamicWidth * adxMultiplier);
+    }
 
     console.log(
-        `   [Strategy] ATR: $${atr.toFixed(2)} | Vol: ${volPercent.toFixed(2)}% | Calc Width: ${dynamicWidth}`
+        `   [Strategy] ATR(15m): $${atr15m.toFixed(2)} | Vol: ${volPercent.toFixed(2)}% | Factor(1h): ${dynamicAtrFactor.toFixed(2)} | ADX(15m): ${adxMultiplier.toFixed(2)}x | Calc Width: ${dynamicWidth}`
     );
 
     // [Optimization] Increased floor to 200 to prevent over-trading.
@@ -562,17 +582,30 @@ export async function executeFullRebalance(
     const MAX_TICK = 887272;
 
 
+    // [Dynamic Skew] Non-linear Skew with Dead Zone [40, 60]
+    // Uses 1h RSI to set the directional bias
     let skew = 0.5;
-
-    if (rsi > 75) {
-        skew = 0.3;
-        console.log(`   [Strategy] RSI High -> Skewing Range DOWN (Bearish Setup)`);
-    } else if (rsi < 25) {
-        skew = 0.7;
-        console.log(`   [Strategy] RSI Low -> Skewing Range UP (Bullish Setup)`);
-    } else {
-        console.log(`   [Strategy] RSI Neutral -> Symmetric Range`);
+    if (rsi1h > 60) {
+        skew = 0.5 - (rsi1h - 60) * 0.0133; // Bearish: Skew < 0.5
+    } else if (rsi1h < 40) {
+        skew = 0.5 + (40 - rsi1h) * 0.0133; // Bullish: Skew > 0.5
     }
+
+    // Clamp to safe range [0.2, 0.8]
+    skew = Math.max(0.2, Math.min(skew, 0.8));
+
+    // [Bollinger Band Override]
+    // If price touches Upper Band -> Extreme Overbought -> Force Skew 0.2
+    // If price touches Lower Band -> Extreme Oversold -> Force Skew 0.8
+    if (currentPrice >= bb1h.upper) {
+        console.log(`   [Strategy] Price ($${currentPrice}) >= 1h BB Upper ($${bb1h.upper.toFixed(2)}). Forcing Bearish Skew 0.2.`);
+        skew = 0.2;
+    } else if (currentPrice <= bb1h.lower) {
+        console.log(`   [Strategy] Price ($${currentPrice}) <= 1h BB Lower ($${bb1h.lower.toFixed(2)}). Forcing Bullish Skew 0.8.`);
+        skew = 0.8;
+    }
+
+    console.log(`   [Strategy] RSI(1h): ${rsi1h.toFixed(2)} | BB Check -> Final Skew: ${skew.toFixed(3)}`);
 
     const totalSpan = WIDTH * 2;
 
@@ -603,6 +636,12 @@ export async function executeFullRebalance(
             tickUpper - tickLower
         })`
     );
+
+    // [Log Strategy Metrics]
+    // Save these indicators to CSV for future analysis
+    const metricsLog = `ATR:${atr15m.toFixed(2)}|RSI:${rsi1h.toFixed(2)}|ADX:${adx15m.toFixed(2)}|BB_UP:${bb1h.upper.toFixed(2)}|BB_LOW:${bb1h.lower.toFixed(2)}|Skew:${skew.toFixed(3)}|Width:${WIDTH}`;
+    logAction(blockNumber, "STRATEGY_METRICS", priceStr, newCurrentTick, metricsLog);
+    console.log(`   [Log] Metrics saved to CSV: ${metricsLog}`);
 
     // 3. Smart Swap (Swap only what is needed for the NEW range)
     try {

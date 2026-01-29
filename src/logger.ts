@@ -1,10 +1,10 @@
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from "fs";
+import * as path from "path";
 
 // 日志目录和文件路径
 // 在 Docker 中 process.cwd() 通常是 /app
-const LOG_DIR = path.join(process.cwd(), 'logs');
-const LOG_FILE = path.join(LOG_DIR, 'trade_history.csv');
+const LOG_DIR = path.join(process.cwd(), "logs");
+const LOG_FILE = path.join(LOG_DIR, "trade_history.csv");
 
 // 初始化：如果文件不存在，创建并写入表头
 function initLogger() {
@@ -22,15 +22,15 @@ initLogger();
 
 export function logAction(
     blockNumber: number,
-    type: "ENTRY" | "REBALANCE" | "STOP_LOSS" | "ERROR" | "INFO",
+    type: "ENTRY" | "REBALANCE" | "STOP_LOSS" | "ERROR" | "INFO" | "STRATEGY_METRICS",
     price: string,
     tick: number,
-    details: string
+    details: string,
 ) {
     const timestamp = new Date().toISOString();
     // 移除详情中的英文逗号和引号，防止破坏 CSV 格式
-    const safeDetails = details.replace(/,/g, ';').replace(/"/g, "'");
-    
+    const safeDetails = details.replace(/,/g, ";").replace(/"/g, "'");
+
     const logLine = `${timestamp},${blockNumber},${type},${price},${tick},"${safeDetails}"\n`;
 
     try {

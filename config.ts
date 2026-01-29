@@ -32,7 +32,7 @@ export const RSI_OVERSOLD = 25;
 // a Risk Management parameter. It determines how "conservative" or "aggressive" your bot is.
 // ATR (Average True Range): This tells you the average volatility over the past few hours.
 // The Problem: The market doesn't always follow the "average." A sudden crash or pump can be 2x or 3x the average volatility.
-export const ATR_SAFETY_FACTOR = 2;
+// [Removed] ATR_SAFETY_FACTOR is now dynamic based on RSI.
 
 // Buffer to prevent "whipsaw" rebalancing (Realizing IL too fast).
 // This is now a percentage of the position's width.

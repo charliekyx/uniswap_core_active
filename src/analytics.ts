@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { RSI, ATR } from 'technicalindicators';
+import { RSI, ATR, ADX, BollingerBands } from 'technicalindicators';
 import { withRetry } from './utils'; // Reuse retry logic
 
 // Binance API for public market data
@@ -144,6 +144,62 @@ export async function getEthAtr(interval: string = '15m', period: number = 14): 
         throw new Error("Insufficient data for ATR");
     } catch (error) {
         console.error(`[Analytics] Failed to fetch ATR: ${(error as Error).message}`);
+        throw error; 
+    }
+}
+
+/**
+ * Calculate Average Directional Index (ADX) to measure trend strength.
+ * ADX > 25 usually indicates a strong trend.
+ */
+export async function getEthAdx(interval: string = '15m', period: number = 14): Promise<number> {
+    try {
+        // Use withRetry to increase stability
+        const data = await withRetry(() => fetchCandles('ETHUSDT', interval, period + 50));
+        
+        const inputADX = {
+            high: data.high,
+            low: data.low,
+            close: data.close,
+            period: period
+        };
+
+        const adxResult = ADX.calculate(inputADX);
+
+        if (adxResult.length > 0) {
+            return adxResult[adxResult.length - 1].adx;
+        }
+        
+        throw new Error("Insufficient data for ADX");
+    } catch (error) {
+        console.error(`[Analytics] Failed to fetch ADX: ${(error as Error).message}`);
+        throw error; 
+    }
+}
+
+/**
+ * Calculate Bollinger Bands to find statistical extremes.
+ * Standard: Period 20, StdDev 2.
+ */
+export async function getEthBollingerBands(interval: string = '1h', period: number = 20, stdDev: number = 2): Promise<{ upper: number; middle: number; lower: number }> {
+    try {
+        // Fetch enough data for calculation
+        const data = await withRetry(() => fetchCandles('ETHUSDT', interval, period + 20));
+        
+        const inputBB = {
+            period: period,
+            values: data.close,
+            stdDev: stdDev
+        };
+
+        const bbResult = BollingerBands.calculate(inputBB);
+
+        if (bbResult.length > 0) {
+            return bbResult[bbResult.length - 1];
+        }
+        throw new Error("Insufficient data for Bollinger Bands");
+    } catch (error) {
+        console.error(`[Analytics] Failed to fetch BB: ${(error as Error).message}`);
         throw error; 
     }
 }

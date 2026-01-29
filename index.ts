@@ -172,7 +172,7 @@ async function onNewBlock(blockNumber: number) {
         // If executeFullRebalance throws (e.g. TWAP check failed), catch it here
         // protects app from crashing, waits for next block retry.
         try {
-            await executeFullRebalance(wallet, configuredPool, "0");
+            await executeFullRebalance(wallet, configuredPool, "0", blockNumber);
             logAction(blockNumber, "INFO", price, Number(slot0.tick), "Entry execution sent.");
         } catch (e) {
             // This is the "Judging" phase. If TWAP fails, we wait.
@@ -254,7 +254,7 @@ async function onNewBlock(blockNumber: number) {
     if (currentTick < (tl - dynamicBufferTicks) || currentTick > (tu + dynamicBufferTicks)) {
         console.log(`[Strategy] Out of Range. Rebalancing...`);    
         logAction(blockNumber, "REBALANCE", currentPrice, currentTick, `Out of range. Old Range: [${tl}, ${tu}]`);
-        await executeFullRebalance(wallet, configuredPool, tokenId);
+        await executeFullRebalance(wallet, configuredPool, tokenId, blockNumber);
         return;
     }
 }
