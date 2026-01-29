@@ -37,7 +37,8 @@ export const RSI_OVERSOLD = 25;
 // Buffer to prevent "whipsaw" rebalancing (Realizing IL too fast).
 // This is now a percentage of the position's width.
 // 0.2 means the buffer is 20% of the position's total width.
-export const REBALANCE_BUFFER_FACTOR = 0.5;
+export const BASE_BUFFER_FACTOR = 0.2; // 基础 Buffer (20%)
+export const ATR_BUFFER_SCALING = 40;  // 波动率放大系数 (波动率 1% -> +0.4 Buffer)
 
 // Volatility Circuit Breaker: Stop-loss mechanism
 // If price deviates from the position's center by more than (WIDTH * FACTOR), exit all to USDC.

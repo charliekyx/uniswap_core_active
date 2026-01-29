@@ -10,7 +10,8 @@ import {
     NPM_ABI,
     NONFUNGIBLE_POSITION_MANAGER_ADDR,
     V3_FACTORY_ADDR,
-    REBALANCE_BUFFER_FACTOR,
+    BASE_BUFFER_FACTOR,
+    ATR_BUFFER_SCALING,
     CIRCUIT_BREAKER_DEVIATION_FACTOR,
 } from "./config";
 
@@ -24,6 +25,7 @@ import {
 import { RobustProvider } from "./src/connection";
 import { sendEmailAlert } from "./src/utils";
 import { logAction } from "./src/logger";
+import { getEthAtr } from "./src/analytics";
 
 dotenv.config();
 
@@ -40,6 +42,10 @@ let isSafeMode = false;
 // Last run timestamp for block listener throttling
 let lastRunTime = 0;
 const MIN_INTERVAL_MS = 3000; // 3s
+
+// [State] Dynamic Buffer Caching
+let cachedAtr = 0;
+let lastAtrUpdate = 0;
 
 async function initialize() {
     const rpcEnv = process.env.RPC_URL || "";
@@ -290,8 +296,31 @@ async function onNewBlock(blockNumber: number) {
     // [Optimized] Dynamic Hysteresis Buffer
     // Only rebalance if price is SIGNIFICANTLY out of range.
     // This prevents realizing IL on small wicks/noise.
-    const dynamicBufferTicks = Math.floor(positionWidth * REBALANCE_BUFFER_FACTOR);
-    console.log(`   [Safety] Using dynamic rebalance buffer of ${dynamicBufferTicks} ticks.`);
+    
+    // 1. Update Volatility (ATR) every 5 minutes
+    if (Date.now() - lastAtrUpdate > 5 * 60 * 1000) {
+        try {
+            cachedAtr = await getEthAtr("15m");
+            lastAtrUpdate = Date.now();
+            console.log(`[System] Updated Market Volatility (ATR 15m): ${cachedAtr}`);
+        } catch (e) {
+            console.warn(`[System] Failed to update ATR for buffer: ${(e as any).message}`);
+        }
+    }
+
+    // 2. Calculate Dynamic Factor based on Volatility
+    let bufferFactor = 0.3; // Fallback default
+    const priceVal = parseFloat(currentPrice);
+    
+    if (cachedAtr > 0 && priceVal > 0) {
+        const volPercent = cachedAtr / priceVal; // e.g. 0.005 (0.5%)
+        bufferFactor = BASE_BUFFER_FACTOR + (volPercent * ATR_BUFFER_SCALING);
+    }
+    // Clamp buffer between 0.1 (10%) and 0.8 (80%)
+    bufferFactor = Math.max(0.1, Math.min(bufferFactor, 0.8));
+
+    const dynamicBufferTicks = Math.floor(positionWidth * bufferFactor);
+    console.log(`   [Safety] Vol: ${(cachedAtr/priceVal*100).toFixed(2)}% | Factor: ${bufferFactor.toFixed(2)} | Buffer Ticks: ${dynamicBufferTicks}`);
 
     if (currentTick < tl - dynamicBufferTicks || currentTick > tu + dynamicBufferTicks) {
         console.log(`[Strategy] Out of Range. Rebalancing...`);
