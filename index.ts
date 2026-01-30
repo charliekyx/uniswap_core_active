@@ -113,31 +113,36 @@ async function getTotalEquity(wallet: ethers.Wallet, pool: Pool, tokenId: string
             let owed1 = parseFloat(ethers.formatUnits(pos.tokensOwed1, pool.token1.decimals));
 
             try {
-                const decreaseLiquidityCalldata = npm.interface.encodeFunctionData("decreaseLiquidity", [{
-                    tokenId: tokenId,
-                    liquidity: 0, // 0 liquidity triggers fee update without changing position
-                    amount0Min: 0,
-                    amount1Min: 0,
-                    deadline: Math.floor(Date.now() / 1000) + 100
-                }]);
+                // Only simulate if position has liquidity.
+                // If liquidity is 0, tokensOwed is already final and accurate.
+                if (liq > 0n) {
+                    const decreaseLiquidityCalldata = npm.interface.encodeFunctionData("decreaseLiquidity", [{
+                        tokenId: tokenId,
+                        liquidity: 0, // 0 liquidity triggers fee update without changing position
+                        amount0Min: 0,
+                        amount1Min: 0,
+                        deadline: Math.floor(Date.now() / 1000) + 3600 // [Fix] Increased deadline to 1h to avoid sync issues
+                    }]);
 
-                const collectCalldata = npm.interface.encodeFunctionData("collect", [{
-                    tokenId: tokenId,
-                    recipient: wallet.address,
-                    amount0Max: MAX_UINT128,
-                    amount1Max: MAX_UINT128
-                }]);
+                    const collectCalldata = npm.interface.encodeFunctionData("collect", [{
+                        tokenId: tokenId,
+                        recipient: wallet.address,
+                        amount0Max: MAX_UINT128,
+                        amount1Max: MAX_UINT128
+                    }]);
 
-                // Static Call to simulate the transaction
-                const results = await npm.getFunction("multicall").staticCall([decreaseLiquidityCalldata, collectCalldata]);
-                
-                // Decode the result of the second call (collect)
-                const collectResult = npm.interface.decodeFunctionResult("collect", results[1]);
-                
-                owed0 = parseFloat(ethers.formatUnits(collectResult[0], pool.token0.decimals));
-                owed1 = parseFloat(ethers.formatUnits(collectResult[1], pool.token1.decimals));
+                    // Static Call to simulate the transaction
+                    const results = await npm.getFunction("multicall").staticCall([decreaseLiquidityCalldata, collectCalldata]);
+                    
+                    // Decode the result of the second call (collect)
+                    const collectResult = npm.interface.decodeFunctionResult("collect", results[1]);
+                    
+                    owed0 = parseFloat(ethers.formatUnits(collectResult[0], pool.token0.decimals));
+                    owed1 = parseFloat(ethers.formatUnits(collectResult[1], pool.token1.decimals));
+                }
             } catch (err) {
-                console.warn(`[Equity Check] Fee simulation failed, using stale data: ${(err as any).message}`);
+                // Use short error message to avoid clutter
+                console.warn(`[Equity Check] Fee simulation failed, using stale data: ${(err as any).shortMessage || (err as any).message}`);
             }
 
             if (wethIsToken0) {
