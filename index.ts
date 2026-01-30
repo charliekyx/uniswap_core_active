@@ -116,29 +116,20 @@ async function getTotalEquity(wallet: ethers.Wallet, pool: Pool, tokenId: string
                 // Only simulate if position has liquidity.
                 // If liquidity is 0, tokensOwed is already final and accurate.
                 if (liq > 0n) {
-                    const decreaseLiquidityCalldata = npm.interface.encodeFunctionData("decreaseLiquidity", [{
-                        tokenId: tokenId,
-                        liquidity: 0, // 0 liquidity triggers fee update without changing position
-                        amount0Min: 0,
-                        amount1Min: 0,
-                        deadline: Math.floor(Date.now() / 1000) + 3600 // [Fix] Increased deadline to 1h to avoid sync issues
-                    }]);
-
-                    const collectCalldata = npm.interface.encodeFunctionData("collect", [{
+                    // [Fix] Use staticCall on collect directly.
+                    // decreaseLiquidity(0) is unnecessary for simulation and its deadline check causes reverts.
+                    // collect() automatically updates fees in the pool before returning.
+                    const collectParams = {
                         tokenId: tokenId,
                         recipient: wallet.address,
                         amount0Max: MAX_UINT128,
                         amount1Max: MAX_UINT128
-                    }]);
+                    };
 
-                    // Static Call to simulate the transaction
-                    const results = await npm.getFunction("multicall").staticCall([decreaseLiquidityCalldata, collectCalldata]);
-                    
-                    // Decode the result of the second call (collect)
-                    const collectResult = npm.interface.decodeFunctionResult("collect", results[1]);
-                    
-                    owed0 = parseFloat(ethers.formatUnits(collectResult[0], pool.token0.decimals));
-                    owed1 = parseFloat(ethers.formatUnits(collectResult[1], pool.token1.decimals));
+                    const results = await npm.getFunction("collect").staticCall(collectParams);
+
+                    owed0 = parseFloat(ethers.formatUnits(results[0], pool.token0.decimals));
+                    owed1 = parseFloat(ethers.formatUnits(results[1], pool.token1.decimals));
                 }
             } catch (err) {
                 // Use short error message to avoid clutter
