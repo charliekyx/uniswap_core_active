@@ -1,5 +1,5 @@
 import { ethers, NonceManager } from "ethers";
-import { Pool } from "@uniswap/v3-sdk";
+import { Pool, Position } from "@uniswap/v3-sdk";
 import * as dotenv from "dotenv";
 
 import {
@@ -13,6 +13,9 @@ import {
     BASE_BUFFER_FACTOR,
     ATR_BUFFER_SCALING,
     CIRCUIT_BREAKER_DEVIATION_FACTOR,
+    HARD_STOP_LOSS_THRESHOLD,
+    MAX_UINT128,
+    ERC20_ABI,
 } from "./config";
 
 import { loadState, saveState, scanLocalOrphans } from "./src/state"; // [Added] scanLocalOrphans
@@ -46,6 +49,114 @@ const MIN_INTERVAL_MS = 3000; // 3s
 // [State] Dynamic Buffer Caching
 let cachedAtr = 0;
 let lastAtrUpdate = 0;
+
+async function getTotalEquity(wallet: ethers.Wallet, pool: Pool, tokenId: string): Promise<number> {
+    const wethContract = new ethers.Contract(WETH_TOKEN.address, ERC20_ABI, provider);
+    const usdcContract = new ethers.Contract(USDC_TOKEN.address, ERC20_ABI, provider);
+
+    const [wethBal, usdcBal] = await Promise.all([
+        wethContract.balanceOf(wallet.address),
+        usdcContract.balanceOf(wallet.address),
+    ]);
+
+    const walletWeth = parseFloat(ethers.formatUnits(wethBal, 18));
+    const walletUsdc = parseFloat(ethers.formatUnits(usdcBal, 6));
+
+    // Determine which token is which in the pool to get correct price
+    const token0Addr = pool.token0.address.toLowerCase();
+    const wethAddr = WETH_TOKEN.address.toLowerCase();
+    
+    let priceUsdPerWeth = 0;
+    let wethIsToken0 = false;
+
+    if (token0Addr === wethAddr) {
+        wethIsToken0 = true;
+        // Price of token0 (WETH) in terms of token1 (USDC)
+        priceUsdPerWeth = parseFloat(pool.token0Price.toSignificant(6));
+    } else {
+        // Price of token1 (WETH) in terms of token0 (USDC)
+        priceUsdPerWeth = parseFloat(pool.token1Price.toSignificant(6));
+    }
+
+    let positionWeth = 0;
+    let positionUsdc = 0;
+
+    if (tokenId && tokenId !== "0") {
+        try {
+            const pos = await npm.positions(tokenId);
+            const liq = pos.liquidity;
+            
+            // 1. Principal in Position
+            if (liq > 0n) {
+                const position = new Position({
+                    pool,
+                    liquidity: liq.toString(),
+                    tickLower: Number(pos.tickLower),
+                    tickUpper: Number(pos.tickUpper),
+                });
+                const amt0 = parseFloat(position.amount0.toExact());
+                const amt1 = parseFloat(position.amount1.toExact());
+
+                if (wethIsToken0) {
+                    positionWeth += amt0;
+                    positionUsdc += amt1;
+                } else {
+                    positionUsdc += amt0;
+                    positionWeth += amt1;
+                }
+            }
+
+            // 2. Uncollected Fees (Real-time Simulation)
+            // [Fix] Simply reading pos.tokensOwed is stale (only updates on tx).
+            // We must simulate a decreaseLiquidity(0) + collect to get the EXACT pending fees.
+            let owed0 = parseFloat(ethers.formatUnits(pos.tokensOwed0, pool.token0.decimals));
+            let owed1 = parseFloat(ethers.formatUnits(pos.tokensOwed1, pool.token1.decimals));
+
+            try {
+                const decreaseLiquidityCalldata = npm.interface.encodeFunctionData("decreaseLiquidity", [{
+                    tokenId: tokenId,
+                    liquidity: 0, // 0 liquidity triggers fee update without changing position
+                    amount0Min: 0,
+                    amount1Min: 0,
+                    deadline: Math.floor(Date.now() / 1000) + 100
+                }]);
+
+                const collectCalldata = npm.interface.encodeFunctionData("collect", [{
+                    tokenId: tokenId,
+                    recipient: wallet.address,
+                    amount0Max: MAX_UINT128,
+                    amount1Max: MAX_UINT128
+                }]);
+
+                // Static Call to simulate the transaction
+                const results = await npm.getFunction("multicall").staticCall([decreaseLiquidityCalldata, collectCalldata]);
+                
+                // Decode the result of the second call (collect)
+                const collectResult = npm.interface.decodeFunctionResult("collect", results[1]);
+                
+                owed0 = parseFloat(ethers.formatUnits(collectResult[0], pool.token0.decimals));
+                owed1 = parseFloat(ethers.formatUnits(collectResult[1], pool.token1.decimals));
+            } catch (err) {
+                console.warn(`[Equity Check] Fee simulation failed, using stale data: ${(err as any).message}`);
+            }
+
+            if (wethIsToken0) {
+                positionWeth += owed0;
+                positionUsdc += owed1;
+            } else {
+                positionUsdc += owed0;
+                positionWeth += owed1;
+            }
+        } catch (e) {
+            console.warn(`[Equity Check] Failed to fetch position info: ${(e as any).message}`);
+        }
+    }
+
+    const totalWeth = walletWeth + positionWeth;
+    const totalUsdc = walletUsdc + positionUsdc;
+    
+    return totalUsdc + (totalWeth * priceUsdPerWeth);
+}
 
 async function initialize() {
     const rpcEnv = process.env.RPC_URL || "";
@@ -182,6 +293,19 @@ async function onNewBlock(blockNumber: number) {
             Number(slot0.tick),
         );
 
+        // [Hard Stop Check - Entry Phase]
+        const totalEquity = await getTotalEquity(wallet, configuredPool, "0");
+        if (blockNumber % 20 === 0) {
+            console.log(`[Equity Check] Block ${blockNumber}: Total Equity = $${totalEquity.toFixed(2)}`);
+        }
+        if (totalEquity < HARD_STOP_LOSS_THRESHOLD) {
+            console.warn(`[Hard Stop] Total Equity ($${totalEquity.toFixed(2)}) < Threshold ($${HARD_STOP_LOSS_THRESHOLD}). Aborting entry.`);
+            await sendEmailAlert("HARD STOP - LOW FUNDS", `Total Equity: $${totalEquity.toFixed(2)} < $${HARD_STOP_LOSS_THRESHOLD}. Bot stopped.`);
+            isSafeMode = true;
+            console.warn("[Hard Stop] Entering Safe Mode (Observation Only).");
+            return;
+        }
+
         const price = configuredPool.token0Price.toSignificant(6);
         logAction(
             blockNumber,
@@ -230,6 +354,26 @@ async function onNewBlock(blockNumber: number) {
         liquidity.toString(),
         currentTick,
     );
+
+    // [Hard Stop Check - Strategy Phase]
+    const totalEquity = await getTotalEquity(wallet, configuredPool, tokenId);
+    if (blockNumber % 20 === 0) {
+        console.log(`[Equity Check] Block ${blockNumber}: Total Equity = $${totalEquity.toFixed(2)}`);
+    }
+    if (totalEquity < HARD_STOP_LOSS_THRESHOLD) {
+        console.warn(`[Hard Stop] Total Equity ($${totalEquity.toFixed(2)}) < Threshold ($${HARD_STOP_LOSS_THRESHOLD}). Triggering emergency exit.`);
+        await sendEmailAlert("HARD STOP LOSS TRIGGERED", `Total Equity: $${totalEquity.toFixed(2)} < $${HARD_STOP_LOSS_THRESHOLD}. Exiting and stopping.`);
+        
+        // 1. Exit Position
+        await atomicExitPosition(wallet, tokenId);
+        // 2. Swap to USDC
+        await swapAllWethToUsdc(wallet);
+        // 3. Stop Trading
+        saveState("0");
+        isSafeMode = true;
+        console.warn("[Hard Stop] Actions complete. Entering Safe Mode (Observation Only).");
+        return;
+    }
 
     const currentPrice = configuredPool.token0Price.toSignificant(6);
 

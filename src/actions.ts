@@ -64,7 +64,18 @@ export async function atomicExitPosition(
     console.log(`\n[Exit] Executing Atomic Exit for Token ${tokenId}...`);
     const npm = new ethers.Contract(NONFUNGIBLE_POSITION_MANAGER_ADDR, NPM_ABI, wallet);
 
-    const pos = await withRetry(() => npm.positions(tokenId));
+    let pos;
+    try {
+        pos = await withRetry(() => npm.positions(tokenId));
+    } catch (e: any) {
+        // If the token is invalid, it means it's likely already burned.
+        if (String(e).includes("Invalid token ID") || e.reason === "Invalid token ID") {
+            console.log(`   [Exit] Token ${tokenId} is invalid (already burned). Skipping exit.`);
+            return { amount0: 0n, amount1: 0n };
+        }
+        throw e;
+    }
+
     const liquidity = pos.liquidity;
 
     const calls: string[] = [];

@@ -51,6 +51,8 @@ export const REBALANCE_THRESHOLD_USDC = 1_000_000n;
 // ~0.0005 ETH
 export const REBALANCE_THRESHOLD_WETH = 500_000_000_000_000n; 
 
+// Hard Stop Loss Threshold (Total Equity in USDC)
+export const HARD_STOP_LOSS_THRESHOLD = 300;
 
 // --- ABIs ---
 export const ERC20_ABI = [
